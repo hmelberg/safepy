@@ -1,0 +1,31 @@
+[project]
+name = "safepython"
+version = "0.0.1"
+description = "Run a familiar subset of Python against private data without revealing individual rows"
+authors = [{ name = "Hans Melberg" }]
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    # result/data-side disclosure control is delegated to `protect`, not reimplemented.
+    # Installed from the sibling repo for now:
+    #   pip install git+https://github.com/hmelberg/protect.git
+    "protect",
+]
+
+[project.optional-dependencies]
+polars = ["polars>=1.0"]
+stats = ["statsmodels>=0.14", "lifelines>=0.27"]
+viz = ["matplotlib>=3.7", "plotly>=5.0"]
+test = ["pytest>=7.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["safepython", "safepython.adapters"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
