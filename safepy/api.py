@@ -29,12 +29,15 @@ def _build_namespace(profile: Profile, policy: Policy, sources: dict[str, Any]) 
     """The single difference between the two security postures.
 
     OPEN   — real pandas/numpy + the raw frames are in scope.
-    STRICT — only the safe-verb library and SafeFrame-wrapped sources; no pandas,
-             no raw frame, so disclosive capabilities are simply not reachable.
+    STRICT — only the safe-verb library, SafeFrame-wrapped sources, and the
+             look-alike `pd`/`np` facades; no real pandas, no raw frame, so
+             disclosive capabilities are simply not reachable.
     """
     verbs = SafeVerbs(policy)
     if profile is Profile.STRICT:
-        return {"safe": verbs, **{name: SafeFrame(df, verbs) for name, df in sources.items()}}
+        from .namespaces import SafeNp, SafePd
+        return {"safe": verbs, "pd": SafePd(), "np": SafeNp(),
+                **{name: SafeFrame(df, verbs) for name, df in sources.items()}}
     return {"pd": pd, "np": np, "safe": verbs, **sources}
 
 

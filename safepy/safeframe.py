@@ -253,6 +253,14 @@ class SafeGroupBy:
             raise DisclosureError("select a single column by name, e.g. groupby(...)['salary']")
         return SafeSeriesGroupBy(self._df, self._by, value, self._verbs)
 
+    def __getattr__(self, name):
+        # df.groupby('sex').salary  ==  df.groupby('sex')['salary']
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if name in self._df.columns:
+            return SafeSeriesGroupBy(self._df, self._by, name, self._verbs)
+        raise DisclosureError(f"{name!r} is not a column")
+
     # pandas-shaped chaining handles aggregation via __getitem__; these support
     # the legacy explicit-value shape groupby(by).mean('salary').
     def mean(self, value, **kw): return self._verbs.group_agg(self._df, self._by, value, "mean", **kw)
@@ -295,6 +303,17 @@ class SafeFrame:
             return SafeFrame(self._df[mask], self._verbs)
         raise DisclosureError("unsupported index; use a column name, list of names, or boolean mask")
 
+    def __getattr__(self, name):
+        # attribute column access: df.salary == df['salary']. Methods are found
+        # by normal lookup first, so they always win over a same-named column.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if name in self._df.columns:
+            return SafeColumn(self._df[name], self._verbs)
+        raise DisclosureError(
+            f"{name!r} is not a column or supported method (a column named like a "
+            "method must be accessed as df['{0}'])".format(name))
+
     # -- shaping verbs: return another SafeFrame --
     def where(self, col: str, op: str, value) -> "SafeFrame":
         if op not in _CMP_OPS:
@@ -304,9 +323,20 @@ class SafeFrame:
         mask = _CMP_OPS[op](self._df[col], value)
         return SafeFrame(self._df[mask], self._verbs)
 
-    def assign(self, name: str, expr: str) -> "SafeFrame":
-        series = _compile_expr(self._df, expr)
-        return SafeFrame(self._df.assign(**{name: series}), self._verbs)
+    def assign(self, *args, **kwargs) -> "SafeFrame":
+        """Add derived columns. Two forms:
+
+          df.assign(logwage=np.log(df['wage']))   # natural pandas: name=SafeColumn
+          df.assign('logwage', 'log(wage)')        # legacy: whitelisted expr string
+        """
+        df = self._df
+        if args:
+            name, expr = args
+            df = df.assign(**{name: _compile_expr(self._df, expr)})
+        for name, val in kwargs.items():
+            series = val._s if isinstance(val, SafeColumn) else val
+            df = df.assign(**{name: series})
+        return SafeFrame(df, self._verbs)
 
     # -- terminal verbs: return a suppressed Released aggregate --
     def groupby(self, by) -> SafeGroupBy:

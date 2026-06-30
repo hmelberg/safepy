@@ -59,7 +59,7 @@ def test_disclosive_paths_refused(code):
     assert r.ok is False
 
 
-def test_pandas_not_in_scope():
-    # under STRICT there is no `pd` / `np` handle at all
+def test_raw_constructors_unavailable():
+    # `pd`/`np` exist as safe facades, but raw constructors/extractors don't
     assert _strict("pd.DataFrame()").ok is False
     assert _strict("np.array([1,2])").ok is False

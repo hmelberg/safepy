@@ -117,6 +117,13 @@ mediator (`adapters/safeframe_adapter.py`).
 The same `safe.*` verbs power both profiles (they unwrap a SafeFrame or take a
 raw frame), so analysis code is largely portable between them.
 
+The look-alike `pd`/`np` facades (`namespaces.py`) take and return `SafeColumn`s
+(or a suppressed `Released` table) and borrow their policy from the column passed
+in. They implement only a whitelist (`np.log/exp/sqrt/abs/where`,
+`pd.crosstab/cut/to_datetime`); any other attribute raises a clear "not
+available" error. So `np.log(df['wage'])` works but `np.array(...)`/`pd.read_csv`
+do not.
+
 ## Regression & survival (statsmodels + lifelines)
 
 `stats.py` adds `ols`/`logit`/`poisson` (statsmodels) and `cox`/`kaplan_meier`
@@ -168,9 +175,11 @@ safestat spec, so it collapses onto m2py's `resolve_policy` when integrated.
    + policy + red-team suite (`tests/attacks/`).
 2. **(done)** STRICT profile: `SafeFrame` capability facade + profile selection.
    **(done, phase 1)** pandas-shaped chaining — `SafeColumn`, `df[mask]`,
-   `groupby(by)[col].agg()`, column reducers. Next: attribute access (`df.salary`),
-   `pd`/`np` look-alike namespaces (phase 2); `smf.ols("y ~ x")` safe formula
-   parser (phase 3).
+   `groupby(by)[col].agg()`, column reducers.
+   **(done, phase 2)** attribute access (`df.salary`, `df.groupby('sex').salary`),
+   look-alike `pd`/`np` namespaces (`np.log`/`np.where`, `pd.cut`/`pd.crosstab`/
+   `pd.to_datetime`, in `namespaces.py`), and natural `df.assign(col=np.log(df['x']))`.
+   Next: `smf.ols("y ~ x")` safe formula parser (phase 3); coverage sweep (phase 4).
 3. **(done)** statsmodels (`ols`/`logit`/`poisson`) + lifelines (`cox`/
    `kaplan_meier`) safe verbs, with per-coefficient / at-risk suppression and no
    user formula strings.
