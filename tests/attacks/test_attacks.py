@@ -8,7 +8,7 @@ it here first; it should fail, then make it pass.
 
 import pytest
 
-from safepython import run, ProtectionLevel
+from safepy import run, ProtectionLevel
 from tests.fixtures import salaries
 
 DF = salaries()

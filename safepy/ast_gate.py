@@ -113,7 +113,7 @@ class _Validator(ast.NodeVisitor):
     def visit(self, node):
         if type(node) not in _ALLOWED_NODES:
             self._fail(node, "syntax",
-                       f"{type(node).__name__} is not allowed in safepython")
+                       f"{type(node).__name__} is not allowed in safepy")
         return super().visit(node)  # dispatches to visit_X then generic_visit
 
     # -- structural rule: assignments then a final expression --

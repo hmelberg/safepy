@@ -1,6 +1,6 @@
 """Restricted execution of already-gated code.
 
-Preconditions: ``code`` has passed :func:`safepython.ast_gate.validate`. The
+Preconditions: ``code`` has passed :func:`safepy.ast_gate.validate`. The
 gate guarantees the structural shape (simple assignments + final expression) and
 that no banned node/verb/name is present, so this module only has to:
 
@@ -46,8 +46,8 @@ def execute(code: str, namespace: dict):
 
     try:
         if prefix:
-            exec(compile(ast.Module(body=prefix, type_ignores=[]), "<safepython>", "exec"), ns)
-        result = eval(compile(ast.Expression(body=last.value), "<safepython>", "eval"), ns)
+            exec(compile(ast.Module(body=prefix, type_ignores=[]), "<safepy>", "exec"), ns)
+        result = eval(compile(ast.Expression(body=last.value), "<safepy>", "eval"), ns)
     except SafePythonError:
         # Our own errors (DisclosureError/ValidationError raised by safe verbs)
         # carry no data values and are meant to be shown to the user verbatim.

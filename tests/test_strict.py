@@ -7,8 +7,8 @@ facade and that the disclosive capabilities are simply absent.
 
 import pytest
 
-from safepython import run
-from safepython.policy import Profile
+from safepy import run
+from safepy.policy import Profile
 from tests.fixtures import salaries
 
 DF = salaries()

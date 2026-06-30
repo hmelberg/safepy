@@ -1,4 +1,4 @@
-# safepython — design
+# safepy — design
 
 ## Goal
 
@@ -12,14 +12,14 @@ language is restricted Python rather than a bespoke DSL.
 
 - **Sandbox, not translator.** The server runs the user's AST-gated Python
   directly. This is the path the m2py *safestat* spec (2026-06-29) deliberately
-  rejected for sensitive data, so safepython is scoped to **public/local** data
+  rejected for sensitive data, so safepy is scoped to **public/local** data
   and treated as a research track. `protected` keeps the sandbox enabled as a
   deliberate research configuration; `sensitive` forbids it (use the
   translate-to-artifact frontend there).
 - **Standalone now, fold into m2py later.** Built against a thin adapter
   interface so it slots in beside `py2m`/`r2m` as a Python *frontend*.
 - **Reuse, don't reimplement.** All data-side and result-side disclosure
-  control is the existing [`protect`](../protect) package. safepython only owns
+  control is the existing [`protect`](../protect) package. safepy only owns
   the *language frontend*: the gate, the sandbox, output mediation, and the
   curated safe verbs.
 
@@ -60,7 +60,7 @@ code ──▶ [1 AST gate] ──▶ [2 restricted runtime] ──▶ value
    the result **object**, never its repr, so a bare `df` yields an object the
    mediator must clear, not a printed table.
 4. **`protect.suppress`** — min-cell, (n,k) dominance, p%-rule, rounding,
-   secondary suppression. Already built; safepython calls it.
+   secondary suppression. Already built; safepy calls it.
 
 ## The load-bearing boundary: provenance
 
@@ -71,7 +71,7 @@ way — an early value-sniffing heuristic released a means table.) Therefore:
 
 - **Raw pandas results are default-denied.** Compute freely for intermediate
   steps, but the *released* value must carry provenance.
-- **`safepython.safe` verbs are the trusted release path.** Each computes the
+- **`safepy.safe` verbs are the trusted release path.** Each computes the
   aggregate *together with its group counts*, runs `protect.suppress`, and
   returns a `Released` value the mediator trusts. `safe` is **policy-bound**:
   `min_n` defaults to the policy floor and callers may only make it stricter.
@@ -81,7 +81,7 @@ This boundary is the seed of the **SafeFrame facade** below.
 ## The two profiles (both built, one engine)
 
 The permissive sandbox can be made *very good* but never *provably complete*,
-because its trusted surface is all of pandas/numpy/statsmodels. So safepython
+because its trusted surface is all of pandas/numpy/statsmodels. So safepy
 ships two postures that share one engine (gate, runtime, mediator, policy,
 `protect`) and differ only in **what is put in the sandbox namespace**, selected
 by `Profile` (which follows `ProtectionLevel`):
@@ -133,10 +133,10 @@ safestat spec, so it collapses onto m2py's `resolve_policy` when integrated.
 
 ## Relationship to the existing repos
 
-| Repo | Role | safepython uses it as |
+| Repo | Role | safepy uses it as |
 |---|---|---|
 | `protect` | SDC verbs (`suppress`, `protect`, `risk`, `profile`) | the disclosure-control engine — called, never reimplemented |
-| `m2py` | microdata emulator, `m2py_runtime` (pandas+polars ops), `py2m`/`r2m` frontends | the host it folds into; `safepython` becomes the `language="python"` frontend |
+| `m2py` | microdata emulator, `m2py_runtime` (pandas+polars ops), `py2m`/`r2m` frontends | the host it folds into; `safepy` becomes the `language="python"` frontend |
 | `microdata-api` | Anvil server, tiered validator, `/run_extended` submit-poll | the deployment target; `run()` is the synchronous core of a future `/run_extended` |
 
 ## Backend notes

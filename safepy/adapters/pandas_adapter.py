@@ -4,7 +4,7 @@ The hard truth this adapter encodes: **a raw pandas result has no provenance the
 mediator can trust.** A table of means whose values happen to be integers is
 indistinguishable from a table of counts; a scalar mean is indistinguishable
 from a scalar max. So this adapter default-denies every raw pandas object and
-points the user at ``safepython.safe`` (the curated verbs that compute an
+points the user at ``safepy.safe`` (the curated verbs that compute an
 aggregate together with its group counts and return a verified ``Released``
 value). Those Released values bypass this adapter entirely — the mediator trusts
 their attached audit.
@@ -46,11 +46,11 @@ class PandasAdapter:
             raise DisclosureError(
                 "a bare scalar cannot be released: its provenance can't be "
                 "verified (a mean is safe, a max is not, and they look identical "
-                "here). Return a grouped table via safepython.safe instead.")
+                "here). Return a grouped table via safepy.safe instead.")
         raise DisclosureError(
             "a raw pandas result cannot be released directly, because its "
             "provenance and group counts are unknown. Produce the result through "
-            "safepython.safe (e.g. safe.group_agg, safe.value_counts, "
+            "safepy.safe (e.g. safe.group_agg, safe.value_counts, "
             "safe.crosstab), which suppresses small cells.")
 
 

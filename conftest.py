@@ -1,4 +1,4 @@
-"""Make safepython and the sibling ``protect`` repo importable without install."""
+"""Make safepy and the sibling ``protect`` repo importable without install."""
 
 import sys
 from pathlib import Path

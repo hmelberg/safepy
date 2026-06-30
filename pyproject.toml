@@ -1,5 +1,5 @@
 [project]
-name = "safepython"
+name = "safepy"
 version = "0.0.1"
 description = "Run a familiar subset of Python against private data without revealing individual rows"
 authors = [{ name = "Hans Melberg" }]
@@ -25,7 +25,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["safepython", "safepython.adapters"]
+packages = ["safepy", "safepy.adapters"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

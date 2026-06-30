@@ -1,4 +1,4 @@
-"""Exceptions for safepython.
+"""Exceptions for safepy.
 
 Two rules govern every message here:
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 
 class SafePythonError(Exception):
-    """Base class for everything safepython raises."""
+    """Base class for everything safepy raises."""
 
 
 class ValidationError(SafePythonError):

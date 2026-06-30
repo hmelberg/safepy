@@ -1,4 +1,4 @@
-# safepython
+# safepy
 
 Run a familiar **subset of Python** against private, individual-level data and
 get back **aggregate results only** — never a row, a scalar extreme, or any view
@@ -6,7 +6,7 @@ of an individual. Think microdata.no, but the input language is restricted
 Python instead of a bespoke DSL.
 
 Disclosure control itself is delegated to the [`protect`](../protect) package;
-safepython owns the *language frontend* — the static gate, the sandbox, output
+safepy owns the *language frontend* — the static gate, the sandbox, output
 mediation, and a set of curated safe verbs. See [DESIGN.md](DESIGN.md).
 
 > **Status:** runnable. Two profiles (OPEN sandbox / STRICT capability facade),
@@ -24,8 +24,8 @@ mediation, and a set of curated safe verbs. See [DESIGN.md](DESIGN.md).
   *Safe by construction; audit surface is the small SafeFrame method list.*
 
 ```python
-from safepython import run
-from safepython.policy import Profile
+from safepy import run
+from safepy.policy import Profile
 
 run("df.groupby('sex').mean('salary')", {"df": df}, profile=Profile.STRICT)
 run("df.ols(y='salary', x=['age', 'sex'])", {"df": df}, profile=Profile.STRICT)
@@ -51,7 +51,7 @@ code ─▶ AST gate ─▶ restricted runtime ─▶ output mediator ─▶ pro
 ## Example
 
 ```python
-from safepython import run, ProtectionLevel
+from safepy import run, ProtectionLevel
 import pandas as pd
 
 df = pd.read_parquet("salaries.parquet")   # private, individual-level

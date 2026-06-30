@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from safepython import run, ProtectionLevel
-from safepython.policy import Profile
+from safepy import run, ProtectionLevel
+from safepy.policy import Profile
 
 sm = pytest.importorskip("statsmodels")
 

@@ -3,11 +3,11 @@
 Deliberately mirrors the shape settled in m2py's safestat design
 (``docs/superpowers/specs/2026-06-29-safestat-remote-compute-slice-design.md``):
 one ordered level per source, resolved *most-restrictive-wins* into a single
-policy object that drives every downstream behaviour. safepython does not invent
+policy object that drives every downstream behaviour. safepy does not invent
 its own knobs; when folded into m2py this module is replaced by m2py's
-``resolve_policy`` and the rest of safepython is unchanged.
+``resolve_policy`` and the rest of safepy is unchanged.
 
-The one safepython-specific addition is ``sandbox_allowed``: this package is the
+The one safepy-specific addition is ``sandbox_allowed``: this package is the
 *sandbox* executor (the server runs the user's AST-gated Python). Per the
 safestat spec, production ``sensitive`` data must use the translate-to-artifact
 frontend instead, so ``sandbox_allowed`` is False there. ``public`` is the

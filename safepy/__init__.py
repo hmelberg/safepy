@@ -1,4 +1,4 @@
-"""safepython — run a familiar subset of Python against private data without ever
+"""safepy — run a familiar subset of Python against private data without ever
 revealing individual-level rows.
 
 Posture: a *sandbox* that runs AST-gated user Python directly (the hard,

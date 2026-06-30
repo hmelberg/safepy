@@ -1,6 +1,6 @@
 """Safe regression and survival verbs (statsmodels + lifelines).
 
-Mixed into :class:`safepython.safe.SafeVerbs`, so they are reachable as
+Mixed into :class:`safepy.safe.SafeVerbs`, so they are reachable as
 ``safe.ols(...)``, ``safe.cox(...)`` and as ``SafeFrame`` methods.
 
 Two disclosure dangers drive every design choice here (see DESIGN.md):

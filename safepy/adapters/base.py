@@ -9,7 +9,7 @@ questions:
 * ``make_safe(result, policy)`` — turn it into a release-checked SafeResult, or
   raise DisclosureError if it cannot be proven safe.
 
-This is the seam that lets safepython fold into m2py later: ``protect`` is the
+This is the seam that lets safepy fold into m2py later: ``protect`` is the
 pandas reference implementation of result-side protection, exactly as the
 safestat spec frames it ("protect is the pandas ProtectionAdapter, not the
 universal engine"). A polars adapter and a statsmodels adapter slot in beside it

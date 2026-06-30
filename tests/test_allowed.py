@@ -1,6 +1,6 @@
 """Positive cases: legitimate aggregate analysis is allowed AND suppressed."""
 
-from safepython import run, ProtectionLevel
+from safepy import run, ProtectionLevel
 from tests.fixtures import salaries
 
 DF = salaries()
@@ -46,7 +46,7 @@ def test_raw_pandas_result_is_refused():
     # raw pandas has no provenance -> default-denied, even for a count table.
     r = _run("df['region'].value_counts()")
     assert r.ok is False
-    assert "safepython.safe" in r.error["message"]
+    assert "safepy.safe" in r.error["message"]
 
 
 def test_sensitive_level_uses_strict_profile():
