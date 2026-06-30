@@ -23,14 +23,24 @@ mediation, and a set of curated safe verbs. See [DESIGN.md](DESIGN.md).
   library are in scope; no pandas, no raw frame. `df.head()` doesn't exist.
   *Safe by construction; audit surface is the small SafeFrame method list.*
 
+In STRICT mode `df` is a `SafeFrame` that mirrors pandas' real call shapes —
+selection, boolean masks, `groupby(...)[col].agg()`, column reducers — while the
+disclosive verbs simply don't exist:
+
 ```python
 from safepy import run
 from safepy.policy import Profile
 
-run("df.groupby('sex').mean('salary')", {"df": df}, profile=Profile.STRICT)
-run("df.ols(y='salary', x=['age', 'sex'])", {"df": df}, profile=Profile.STRICT)
-run("df.kaplan_meier(duration='dur', event='died', by='sex')", {"df": df}, profile=Profile.STRICT)
-run("df.head()", {"df": df}, profile=Profile.STRICT)   # ok=False: not a SafeFrame method
+S = dict(profile=Profile.STRICT)
+run("df.groupby('sex')['salary'].mean()", {"df": df}, **S)              # suppressed table
+run("df[df['age'] >= 40]['salary'].median()", {"df": df}, **S)         # suppressed scalar
+run("df[(df['age'] >= 40) & (df['sex'] == 'F')].groupby('region')['salary'].mean()", {"df": df}, **S)
+run("df['region'].value_counts()", {"df": df}, **S)
+run("df.ols(y='salary', x=['age', 'sex'])", {"df": df}, **S)            # statsmodels
+run("df.kaplan_meier(duration='dur', event='died', by='sex')", {"df": df}, **S)  # lifelines
+
+run("df['salary'].max()", {"df": df}, **S)   # ok=False: extremes reveal individuals
+run("df.head()", {"df": df}, **S)            # ok=False: not a SafeFrame method
 ```
 
 ## How it works

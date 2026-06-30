@@ -95,13 +95,24 @@ by `Profile` (which follows `ProtectionLevel`):
 | For | public / local | protected / sensitive |
 
 In STRICT mode `df.head()` is not blocked — it **doesn't exist**, because
-`SafeFrame` has no such method. The only data object reachable is a `SafeFrame`
-(`safeframe.py`) exposing a closed verb set: `where`/`assign` (shaping, return a
-SafeFrame), `groupby().mean()/sum()/...`, `value_counts`, `crosstab`, and the
-regression/survival verbs — every terminal verb returning a suppressed
-`Released` aggregate. The raw frame lives in `_df`, unreachable from user code
-(the gate blocks `_`-attributes). A dangling SafeFrame returned as the final
-result is refused by the mediator (`adapters/safeframe_adapter.py`).
+`SafeFrame` has no such method. The facade mirrors pandas' **real call shapes**
+(`safeframe.py`): `df['salary']` and `df[['a','b']]` (selection), `df[mask]`
+boolean filtering, `df.groupby('sex')['salary'].mean()` (the traditional grouped
+shape), whole-column reducers `df['salary'].mean()` (→ a suppressed scalar),
+`df['region'].value_counts()`, `assign`/`where`, plus the regression/survival
+verbs. Every terminal reducer returns a suppressed `Released` aggregate.
+
+The linchpin is **`SafeColumn`**: it carries a column through comparisons (→
+mask), arithmetic (→ derived column), `isin`/`isna`/`between`, a small `.dt`
+accessor, and the safe reducers — while exposing **no** value: no `__repr__`/
+`__iter__`/`values`/`tolist`/`max`/`min`/`quantile`/`__getitem__`/scalar
+coercion. Reducers are sound because *we* own them and therefore know the
+contributing count, so the same `min_n` rule protects whole-column, filtered,
+and grouped aggregates alike (`df[df['region']=='Z']['salary'].mean()` over 2
+people is suppressed). The raw objects live in `_df`/`_s`, unreachable from user
+code (the gate blocks `_`-attributes). A dangling intermediate (`SafeFrame`,
+`SafeColumn`, grouped object) returned as the final result is refused by the
+mediator (`adapters/safeframe_adapter.py`).
 
 The same `safe.*` verbs power both profiles (they unwrap a SafeFrame or take a
 raw frame), so analysis code is largely portable between them.
@@ -156,6 +167,10 @@ safestat spec, so it collapses onto m2py's `resolve_policy` when integrated.
 1. **(done)** OPEN vertical slice: gate + runtime + mediator + pandas safe verbs
    + policy + red-team suite (`tests/attacks/`).
 2. **(done)** STRICT profile: `SafeFrame` capability facade + profile selection.
+   **(done, phase 1)** pandas-shaped chaining — `SafeColumn`, `df[mask]`,
+   `groupby(by)[col].agg()`, column reducers. Next: attribute access (`df.salary`),
+   `pd`/`np` look-alike namespaces (phase 2); `smf.ols("y ~ x")` safe formula
+   parser (phase 3).
 3. **(done)** statsmodels (`ols`/`logit`/`poisson`) + lifelines (`cox`/
    `kaplan_meier`) safe verbs, with per-coefficient / at-risk suppression and no
    user formula strings.

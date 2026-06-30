@@ -56,6 +56,6 @@ def test_sensitive_level_uses_strict_profile():
             {"df": DF}, ProtectionLevel.SENSITIVE)
     assert r.ok and r.audit["profile"] == "strict"
 
-    # raw pandas is unavailable under STRICT (no `pd`, source is a SafeFrame)
-    r2 = run("df['region'].value_counts()", {"df": DF}, ProtectionLevel.SENSITIVE)
+    # raw pandas is unavailable under STRICT (no `pd` handle in scope)
+    r2 = run("pd.DataFrame({'x': [1]})", {"df": DF}, ProtectionLevel.SENSITIVE)
     assert r2.ok is False
