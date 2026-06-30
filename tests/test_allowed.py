@@ -49,8 +49,13 @@ def test_raw_pandas_result_is_refused():
     assert "safepython.safe" in r.error["message"]
 
 
-def test_sensitive_level_forbids_sandbox():
+def test_sensitive_level_uses_strict_profile():
+    # SENSITIVE runs in the STRICT capability profile: safe verbs work, but the
+    # source is a SafeFrame and raw pandas is not in scope.
     r = run("safe.group_agg(df, 'sex', 'salary', 'mean')",
             {"df": DF}, ProtectionLevel.SENSITIVE)
-    assert r.ok is False
-    assert "forbids direct execution" in r.error["message"]
+    assert r.ok and r.audit["profile"] == "strict"
+
+    # raw pandas is unavailable under STRICT (no `pd`, source is a SafeFrame)
+    r2 = run("df['region'].value_counts()", {"df": DF}, ProtectionLevel.SENSITIVE)
+    assert r2.ok is False

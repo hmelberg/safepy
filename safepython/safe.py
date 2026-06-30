@@ -23,6 +23,7 @@ from ._payload import series_payload, frame_payload
 from .errors import DisclosureError
 from .policy import Policy
 from .result import Released
+from .stats import StatsMixin
 
 try:
     import protect
@@ -34,8 +35,21 @@ except ImportError:  # pragma: no cover
 _ALLOWED_AGGS = frozenset({"mean", "sum", "count", "size", "median", "std", "var"})
 
 
-class SafeVerbs:
-    """Policy-bound safe verbs injected into the sandbox as ``safe``."""
+def _unwrap(df):
+    """Accept either a raw frame (OPEN profile) or a SafeFrame (STRICT profile).
+
+    Trusted code may reach the underlying frame; user code cannot (the gate
+    blocks ``_df`` as a private attribute). Duck-typed to avoid importing
+    SafeFrame here (it imports this module)."""
+    return df._df if getattr(df, "_is_safeframe", False) else df
+
+
+class SafeVerbs(StatsMixin):
+    """Policy-bound safe verbs injected into the sandbox as ``safe``.
+
+    Tabular verbs (group_agg/value_counts/crosstab) live here; regression and
+    survival verbs (ols/logit/poisson/cox/kaplan_meier) come from StatsMixin.
+    """
 
     def __init__(self, policy: Policy):
         self._policy = policy
@@ -55,6 +69,7 @@ class SafeVerbs:
         if agg not in _ALLOWED_AGGS:
             raise DisclosureError(
                 f"agg '{agg}' is not allowed; choose one of {sorted(_ALLOWED_AGGS)}")
+        df = _unwrap(df)
         k = self._min_n(min_n)
         grouped = df.groupby(by, observed=True)[value]
         table = grouped.size() if agg == "size" else getattr(grouped, agg)()
@@ -69,6 +84,7 @@ class SafeVerbs:
         """Suppressed frequency table of one column."""
         if protect is None:
             raise DisclosureError("the 'protect' package is required")
+        df = _unwrap(df)
         k = self._min_n(min_n)
         counts = df[col].value_counts()
         safe = protect.suppress(counts, counts=counts, min_n=k, round=self._round(round))
@@ -81,6 +97,7 @@ class SafeVerbs:
         """Suppressed frequency cross-tabulation of two columns."""
         if protect is None:
             raise DisclosureError("the 'protect' package is required")
+        df = _unwrap(df)
         k = self._min_n(min_n)
         tab = pd.crosstab(df[row], df[col])
         safe = protect.suppress(tab, counts=tab, min_n=k, round=self._round(round))

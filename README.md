@@ -9,8 +9,29 @@ Disclosure control itself is delegated to the [`protect`](../protect) package;
 safepython owns the *language frontend* — the static gate, the sandbox, output
 mediation, and a set of curated safe verbs. See [DESIGN.md](DESIGN.md).
 
-> **Status:** runnable vertical slice (pandas). Research track, scoped to
-> public/local data — see the posture note in DESIGN.md.
+> **Status:** runnable. Two profiles (OPEN sandbox / STRICT capability facade),
+> pandas tabular verbs, and statsmodels + lifelines regression/survival verbs.
+> 68 tests passing. See [DESIGN.md](DESIGN.md).
+
+## Two profiles, one engine
+
+- **OPEN** (public/local) — real pandas + the raw frame are in scope; safety
+  comes from the gate (deny-list) and the mediator (raw results refused unless
+  produced through a `safe.*` verb). *Probably safe; audit surface is all of
+  pandas.*
+- **STRICT** (protected/sensitive) — only a `SafeFrame` facade and the safe-verb
+  library are in scope; no pandas, no raw frame. `df.head()` doesn't exist.
+  *Safe by construction; audit surface is the small SafeFrame method list.*
+
+```python
+from safepython import run
+from safepython.policy import Profile
+
+run("df.groupby('sex').mean('salary')", {"df": df}, profile=Profile.STRICT)
+run("df.ols(y='salary', x=['age', 'sex'])", {"df": df}, profile=Profile.STRICT)
+run("df.kaplan_meier(duration='dur', event='died', by='sex')", {"df": df}, profile=Profile.STRICT)
+run("df.head()", {"df": df}, profile=Profile.STRICT)   # ok=False: not a SafeFrame method
+```
 
 ## How it works
 

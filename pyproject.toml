@@ -7,6 +7,8 @@ requires-python = ">=3.10"
 dependencies = [
     "pandas>=2.0",
     "numpy>=1.24",
+    "statsmodels>=0.14",   # ols/logit/poisson safe verbs
+    "lifelines>=0.27",     # cox/kaplan_meier safe verbs
     # result/data-side disclosure control is delegated to `protect`, not reimplemented.
     # Installed from the sibling repo for now:
     #   pip install git+https://github.com/hmelberg/protect.git
@@ -15,7 +17,6 @@ dependencies = [
 
 [project.optional-dependencies]
 polars = ["polars>=1.0"]
-stats = ["statsmodels>=0.14", "lifelines>=0.27"]
 viz = ["matplotlib>=3.7", "plotly>=5.0"]
 test = ["pytest>=7.0"]
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import ast
 
-from .errors import SandboxError
+from .errors import SafePythonError, SandboxError
 
 # A minimal, audited builtin surface. Mirrors ast_gate._SAFE_BUILTINS plus the
 # constants/exceptions ordinary expressions need. No import, eval, open, getattr.
@@ -48,7 +48,9 @@ def execute(code: str, namespace: dict):
         if prefix:
             exec(compile(ast.Module(body=prefix, type_ignores=[]), "<safepython>", "exec"), ns)
         result = eval(compile(ast.Expression(body=last.value), "<safepython>", "eval"), ns)
-    except SandboxError:
+    except SafePythonError:
+        # Our own errors (DisclosureError/ValidationError raised by safe verbs)
+        # carry no data values and are meant to be shown to the user verbatim.
         raise
     except BaseException as exc:  # noqa: BLE001 - deliberately broad; message is dropped
         # Do NOT include str(exc): it may contain a data value (KeyError on a

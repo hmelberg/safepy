@@ -76,9 +76,53 @@ way — an early value-sniffing heuristic released a means table.) Therefore:
   returns a `Released` value the mediator trusts. `safe` is **policy-bound**:
   `min_n` defaults to the policy floor and callers may only make it stricter.
 
-This boundary is the seed of a **phase-2 SafeFrame facade**: a capability proxy
-whose every verb records how it aggregated, so a richer pandas-like surface can
-release results while keeping provenance.
+This boundary is the seed of the **SafeFrame facade** below.
+
+## The two profiles (both built, one engine)
+
+The permissive sandbox can be made *very good* but never *provably complete*,
+because its trusted surface is all of pandas/numpy/statsmodels. So safepython
+ships two postures that share one engine (gate, runtime, mediator, policy,
+`protect`) and differ only in **what is put in the sandbox namespace**, selected
+by `Profile` (which follows `ProtectionLevel`):
+
+| | **OPEN** (`policy.Profile.OPEN`) | **STRICT** (`policy.Profile.STRICT`) |
+|---|---|---|
+| Namespace | `pd`, `np`, raw frame, `safe` | `safe` + `SafeFrame`-wrapped sources only |
+| Defense | enumeration: gate denylist + mediator provenance | construction: disclosive capabilities aren't reachable |
+| Audit surface | all of pandas (open-ended) | the `SafeFrame` method list (small, closed) |
+| Property | "probably safe" | "safe by construction" |
+| For | public / local | protected / sensitive |
+
+In STRICT mode `df.head()` is not blocked — it **doesn't exist**, because
+`SafeFrame` has no such method. The only data object reachable is a `SafeFrame`
+(`safeframe.py`) exposing a closed verb set: `where`/`assign` (shaping, return a
+SafeFrame), `groupby().mean()/sum()/...`, `value_counts`, `crosstab`, and the
+regression/survival verbs — every terminal verb returning a suppressed
+`Released` aggregate. The raw frame lives in `_df`, unreachable from user code
+(the gate blocks `_`-attributes). A dangling SafeFrame returned as the final
+result is refused by the mediator (`adapters/safeframe_adapter.py`).
+
+The same `safe.*` verbs power both profiles (they unwrap a SafeFrame or take a
+raw frame), so analysis code is largely portable between them.
+
+## Regression & survival (statsmodels + lifelines)
+
+`stats.py` adds `ols`/`logit`/`poisson` (statsmodels) and `cox`/`kaplan_meier`
+(lifelines), reachable as `safe.ols(...)` and as `SafeFrame.ols(...)`. Two
+disclosure dangers shaped the design:
+
+- **No user formula strings.** A patsy formula is `eval`-ed, and the AST gate
+  can't see inside a string literal — so a raw formula would re-open the
+  code-execution channel. Callers pass column *names*; we validate each
+  (`^[A-Za-z_]\w*$` + must be a real column) and build the formula ourselves.
+- **Per-coefficient suppression.** A dummy for a categorical level with few
+  members leaks those individuals. After fitting, we compute the support behind
+  every term and blank any coefficient/CI/p-value with support `< min_n` (Cox
+  drops sub-`min_n` dummy levels before fitting). Kaplan-Meier drops the tail
+  where the at-risk set falls below `min_n` (that tail is individual event
+  times). Only aggregate summaries are returned; `.predict`/`.resid`/per-subject
+  curves are never exposed because no verb returns them.
 
 ## ProtectionLevel
 
@@ -109,15 +153,27 @@ safestat spec, so it collapses onto m2py's `resolve_policy` when integrated.
 
 ## Roadmap
 
-1. **(done)** Vertical slice: gate + runtime + mediator + pandas safe verbs +
-   policy + red-team suite (`tests/attacks/`).
-2. polars adapter + safe verbs (lazy-plan introspection).
-3. statsmodels / lifelines adapters (release `.summary()`; deny per-observation
-   attributes like `.predict`, `.resid`, `.fittedvalues`, per-subject curves).
-4. viz adapter — inspect the figure's **backing arrays**, not the picture
+1. **(done)** OPEN vertical slice: gate + runtime + mediator + pandas safe verbs
+   + policy + red-team suite (`tests/attacks/`).
+2. **(done)** STRICT profile: `SafeFrame` capability facade + profile selection.
+3. **(done)** statsmodels (`ols`/`logit`/`poisson`) + lifelines (`cox`/
+   `kaplan_meier`) safe verbs, with per-coefficient / at-risk suppression and no
+   user formula strings.
+4. polars adapter + safe verbs (lazy-plan introspection); the STRICT `SafeFrame`
+   could wrap a polars `LazyFrame` for free query-plan auditing.
+5. viz adapter — inspect the figure's **backing arrays**, not the picture
    (plotly embeds raw arrays in its JSON; scatter = full data; box = extremes).
-5. Phase-2 SafeFrame facade for a richer, provenance-carrying surface.
 6. Fold into m2py as the `language="python"` frontend; wire `/run_extended`.
+
+### Known gaps / next steps (honest list)
+
+- `protect`'s richer rules (dominance, p%, secondary suppression) aren't wired
+  into the safe verbs yet — only `min_n` + rounding. The hooks exist.
+- `SafeFrame.where` supports a single column-vs-literal comparison; no compound
+  predicates yet (compose with multiple `.where` calls).
+- No viz verbs yet — plotting is the highest-risk surface and is deferred.
+- OLS/GLM term support for interaction/transform terms defaults to full `n`
+  (only main-effect categorical levels are individually suppressed).
 
 ## Non-goals (handled elsewhere)
 

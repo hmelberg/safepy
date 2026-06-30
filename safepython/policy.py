@@ -28,6 +28,23 @@ class ProtectionLevel(str, Enum):
     SENSITIVE = "sensitive"
 
 
+class Profile(str, Enum):
+    """Which executor runs the code — the single knob separating the two
+    security postures. Both share the same gate/runtime/mediator/protect; they
+    differ only in what is put in the sandbox namespace.
+
+    OPEN   — real pandas + the raw frame are in scope. Defended by enumeration
+             (gate node-whitelist + method deny-list + mediator provenance).
+             "Probably safe"; audit surface is all of pandas. For public/local.
+    STRICT — only a SafeFrame facade and the safe-verb library are in scope; no
+             pandas, no raw frame. Defended by construction: disclosive
+             capabilities are not reachable. Audit surface is the small closed
+             SafeFrame method list. For protected/sensitive.
+    """
+    OPEN = "open"
+    STRICT = "strict"
+
+
 _ORDER = {ProtectionLevel.PUBLIC: 0,
           ProtectionLevel.PROTECTED: 1,
           ProtectionLevel.SENSITIVE: 2}
@@ -40,20 +57,16 @@ class Policy:
     log: bool
     min_n: int               # primary suppression threshold (cells with n<min_n blanked)
     round_to: int | None     # rounding base for released counts, or None
-    sandbox_allowed: bool     # may the server run user Python directly for this level?
-
-    def require_sandbox(self) -> None:
-        """Raise if this policy forbids direct execution of user Python."""
-        if not self.sandbox_allowed:
-            from .errors import DisclosureError
-            raise DisclosureError(
-                f"protection level '{self.level.value}' forbids direct execution "
-                "of user Python; use the translate-to-artifact frontend"
-            )
+    profile: Profile          # which executor (OPEN sandbox vs STRICT capability)
 
 
 def resolve_policy(levels: list[ProtectionLevel | str]) -> Policy:
-    """Most-restrictive-source-wins resolution to one policy."""
+    """Most-restrictive-source-wins resolution to one policy.
+
+    Profile follows the level: public gets the OPEN sandbox; protected and
+    sensitive get the STRICT capability executor. A caller may override the
+    profile explicitly (see ``api.run``) for development/testing.
+    """
     if not levels:
         levels = [ProtectionLevel.PROTECTED]
     norm = [ProtectionLevel(l) for l in levels]
@@ -61,9 +74,9 @@ def resolve_policy(levels: list[ProtectionLevel | str]) -> Policy:
 
     if level is ProtectionLevel.PUBLIC:
         return Policy(level, auth_required=False, log=False,
-                      min_n=1, round_to=None, sandbox_allowed=True)
+                      min_n=1, round_to=None, profile=Profile.OPEN)
     if level is ProtectionLevel.PROTECTED:
         return Policy(level, auth_required=True, log=True,
-                      min_n=5, round_to=None, sandbox_allowed=True)
+                      min_n=5, round_to=None, profile=Profile.OPEN)
     return Policy(level, auth_required=True, log=True,
-                  min_n=5, round_to=10, sandbox_allowed=False)
+                  min_n=5, round_to=10, profile=Profile.STRICT)

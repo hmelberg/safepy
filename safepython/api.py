@@ -18,42 +18,53 @@ import pandas as pd
 from .ast_gate import validate
 from .errors import DisclosureError, SafePythonError, SandboxError, ValidationError
 from .mediator import mediate
-from .policy import Policy, ProtectionLevel, resolve_policy
+from .policy import Policy, Profile, ProtectionLevel, resolve_policy
 from .result import SafeResult
 from .runtime import execute
 from .safe import SafeVerbs
+from .safeframe import SafeFrame
 
-# Library handles exposed inside the sandbox. ``safe`` is added per-call because
-# it is bound to the resolved policy. These names plus the source names are the
-# only bare names user code may call (besides ast_gate._SAFE_BUILTINS).
-_LIB_HANDLES = {"pd": pd, "np": np}
+
+def _build_namespace(profile: Profile, policy: Policy, sources: dict[str, Any]) -> dict:
+    """The single difference between the two security postures.
+
+    OPEN   — real pandas/numpy + the raw frames are in scope.
+    STRICT — only the safe-verb library and SafeFrame-wrapped sources; no pandas,
+             no raw frame, so disclosive capabilities are simply not reachable.
+    """
+    verbs = SafeVerbs(policy)
+    if profile is Profile.STRICT:
+        return {"safe": verbs, **{name: SafeFrame(df, verbs) for name, df in sources.items()}}
+    return {"pd": pd, "np": np, "safe": verbs, **sources}
 
 
 def run(code: str,
         sources: dict[str, Any],
-        level: ProtectionLevel | str = ProtectionLevel.PROTECTED) -> SafeResult:
+        level: ProtectionLevel | str = ProtectionLevel.PROTECTED,
+        *, profile: Profile | str | None = None) -> SafeResult:
     """Validate, run, and disclosure-check ``code`` against ``sources``.
 
     ``sources`` maps the names user code may reference (e.g. ``{"df": frame}``)
-    to private data objects. ``level`` selects the protection policy.
+    to private data objects. ``level`` selects the protection policy; ``profile``
+    overrides the executor (OPEN sandbox vs STRICT capability) for that policy,
+    which is useful for development and testing.
     """
     policy: Policy = resolve_policy([level])
+    active = Profile(profile) if profile is not None else policy.profile
 
     try:
-        policy.require_sandbox()  # refuses direct exec for 'sensitive'
-
-        handles = {**_LIB_HANDLES, "safe": SafeVerbs(policy)}
-        allowed_names = frozenset(handles) | frozenset(sources)
+        namespace = _build_namespace(active, policy, sources)
+        allowed_names = frozenset(namespace)
         gate = validate(code, allowed_names=allowed_names)
         if not gate.ok:
             assert gate.error is not None
             return SafeResult(ok=False, kind="error", error=gate.error.as_dict())
 
-        namespace = {**handles, **sources}
         value = execute(code, namespace)
 
         result = mediate(value, policy)
         result.audit.setdefault("level", policy.level.value)
+        result.audit.setdefault("profile", active.value)
         result.audit.setdefault("verbs_used", gate.calls)
         return result
 
