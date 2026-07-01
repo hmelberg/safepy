@@ -158,18 +158,37 @@ class SafeVerbs(StatsMixin):
 
     def group_agg(self, df: pd.DataFrame, by, value: str, agg: str = "mean",
                   *, min_n=None, round=None) -> Released:
-        """``df.groupby(by)[value].agg(...)`` with paired counts and suppression."""
+        """``df.groupby(by)[value].agg(...)`` with paired counts and suppression.
+
+        The *compute* (groupby + winsorize) is pandas-specific; the *release*
+        (suppression + count-noise + audit) is backend-neutral (``_release_group_agg``)
+        so a polars backend can compute ``(table, counts)`` natively and reuse the
+        exact same audited suppressor. See ``polars_api._native_group_agg``."""
+        if agg not in _ALLOWED_AGGS:
+            raise DisclosureError(
+                f"agg '{agg}' is not allowed; choose one of {sorted(_ALLOWED_AGGS)}")
+        df = _unwrap(df)
+        counts = df.groupby(by, observed=True)[value].size()
+        work = _winsorize_col(df, value, self._policy) if agg in _WINSOR_AGGS else df
+        grouped = work.groupby(by, observed=True)[value]
+        table = counts if agg == "size" else getattr(grouped, agg)()
+        return self._release_group_agg(table, counts, agg=agg, by=by, value=value,
+                                       min_n=min_n, round=round, backend="pandas")
+
+    def _release_group_agg(self, table, counts, *, agg, by, value,
+                           min_n=None, round=None, backend="pandas") -> Released:
+        """Backend-neutral release: given an already-computed per-group aggregate
+        ``table`` and paired ``counts`` (pandas Series, shared index), suppress
+        below ``min_n``, apply count-noise (Tiltak 3), and stamp the audit. This
+        is the single audited suppressor for grouped aggregates, whatever backend
+        produced the numbers."""
         if protect is None:
             raise DisclosureError("the 'protect' package is required")
         if agg not in _ALLOWED_AGGS:
             raise DisclosureError(
                 f"agg '{agg}' is not allowed; choose one of {sorted(_ALLOWED_AGGS)}")
-        df = _unwrap(df)
+        table = table.reindex(counts.index)     # align (polars group order isn't stable)
         k = max(self._min_n(min_n), _agg_min_n(self._policy, agg))
-        counts = df.groupby(by, observed=True)[value].size()
-        work = _winsorize_col(df, value, self._policy) if agg in _WINSOR_AGGS else df
-        grouped = work.groupby(by, observed=True)[value]
-        table = counts if agg == "size" else getattr(grouped, agg)()
         noising = bool(self._policy.suppression.count_noise)
         # when noising counts, don't also round them (rounding would swamp the noise)
         rnd = None if (noising and agg in ("count", "size")) else self._round(round)
@@ -180,7 +199,7 @@ class SafeVerbs(StatsMixin):
             "kind": "table", "verb": "group_agg", "agg": agg, "by": by,
             "value": value, "min_n": k, "groups": int(len(counts)),
             "count_noise": self._policy.suppression.count_noise,
-            "cells_suppressed": int((counts < k).sum()), "backend": "pandas"})
+            "cells_suppressed": int((counts < k).sum()), "backend": backend})
 
     def _apply_count_noise(self, safe, table, counts, agg):
         """Tiltak 3 for a grouped release: noise the counts, and keep sums/means

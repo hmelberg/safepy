@@ -31,6 +31,42 @@ from .safe import SafeVerbs
 # quantile/top_k/arg_max …) are deliberately absent: they return individuals.
 _SAFE_REDUCERS = frozenset({"mean", "sum", "count", "median", "std", "var"})
 
+# Grouped moment aggregates that winsorization (Tiltak 2) affects — must mirror
+# safe._WINSOR_AGGS so the native path winsorizes exactly where the pandas path does.
+_WINSOR_AGGS = frozenset({"mean", "std", "var", "sum"})
+
+
+def _winsorize_polars(pl_df: pl.DataFrame, value: str, agg: str, policy) -> pl.DataFrame:
+    """Global winsorization of ``value`` (Tiltak 2), computed natively in polars.
+    Uses linear-interpolation quantiles to match pandas/``protect.winsorize``
+    byte-for-byte (verified numerically). No-op when winsorize is off, the agg is
+    not moment-based, or the column is non-numeric/boolean."""
+    w = policy.suppression.winsorize
+    if w is None or agg not in _WINSOR_AGGS:
+        return pl_df
+    dtype = pl_df.schema[value]
+    if not dtype.is_numeric() or dtype == pl.Boolean:
+        return pl_df
+    lo = pl_df.select(pl.col(value).quantile(float(w[0]), interpolation="linear")).item()
+    hi = pl_df.select(pl.col(value).quantile(float(w[1]), interpolation="linear")).item()
+    return pl_df.with_columns(pl.col(value).clip(lo, hi))
+
+
+def _native_group_agg(pl_df: pl.DataFrame, by: list, value: str, agg: str, policy):
+    """Compute the per-group aggregate and paired row counts **natively in polars**,
+    returning them as pandas Series (small — one row per group) sharing a group
+    index, ready for the backend-neutral ``SafeVerbs._release_group_agg``. Only the
+    aggregate crosses to pandas; the private per-row frame stays in polars."""
+    counts = (pl_df.group_by(by).agg(pl.len().alias("__n"))
+              .to_pandas().set_index(by)["__n"])
+    if agg == "size":
+        return counts.copy(), counts
+    work = _winsorize_polars(pl_df, value, agg, policy)
+    expr = getattr(pl.col(value), agg)()          # mean/sum/std/var/median/count
+    table = (work.group_by(by).agg(expr.alias("__v"))
+             .to_pandas().set_index(by)["__v"])
+    return table, counts
+
 
 class SafeExpr:
     """A wrapped ``pl.Expr``. Shaping operations return a new SafeExpr carrying a
@@ -230,8 +266,11 @@ class SafePolarsGroupBy:
     def len(self):
         """``df.group_by(by).len()`` — the row count per group (polars-idiomatic),
         suppressed below min_n like any other count."""
+        table, counts = _native_group_agg(self._pl, self._by, self._by[0], "size",
+                                          self._verbs._policy)
         by = self._by[0] if len(self._by) == 1 else self._by
-        return self._verbs.group_agg(self._pl.to_pandas(), by, self._by[0], "size")
+        return self._verbs._release_group_agg(table, counts, agg="size", by=by,
+                                              value=self._by[0], backend="polars")
 
     def agg(self, *exprs):
         if not exprs:
@@ -242,19 +281,23 @@ class SafePolarsGroupBy:
         return self._combine(rels)
 
     def _one_agg(self, e) -> Released:
-        """One reducer -> a suppressed series Released, routed through SafeVerbs."""
+        """One reducer -> a suppressed series Released. The aggregate + counts are
+        computed natively in polars (only the small result crosses to pandas), then
+        released through the shared, audited SafeVerbs suppressor."""
         if not isinstance(e, SafeExpr) or e._agg is None:
             raise DisclosureError(
                 "agg needs reducers over columns, e.g. pl.col('salary').mean()")
-        by = self._by[0] if len(self._by) == 1 else self._by
+        policy = self._verbs._policy
+        by_audit = self._by[0] if len(self._by) == 1 else self._by
         if e._col is not None and e._name is None:   # simple column: fast path
-            return self._verbs.group_agg(self._pl.to_pandas(), by, e._col, e._agg)
-        # derived expression, or an aliased column: materialize a value column so
-        # the released name follows the alias.
-        name = e._name or "value"
-        base = e._pre if e._col is None else pl.col(e._col)
-        pdf = self._pl.with_columns(base.alias(name)).to_pandas()
-        rel = self._verbs.group_agg(pdf, by, name, e._agg)
+            frame, value = self._pl, e._col
+        else:                                        # derived / aliased: materialize it
+            value = e._name or "value"
+            base = e._pre if e._col is None else pl.col(e._col)
+            frame = self._pl.with_columns(base.alias(value))
+        table, counts = _native_group_agg(frame, self._by, value, e._agg, policy)
+        rel = self._verbs._release_group_agg(table, counts, agg=e._agg, by=by_audit,
+                                             value=value, backend="polars")
         if e._name:                                  # honor the alias as the output name
             rel.payload["name"] = e._name
         return rel
@@ -270,7 +313,7 @@ class SafePolarsGroupBy:
         return Released(
             {"type": "frame", "columns": columns, "index": index, "data": data},
             audit={"kind": "table", "verb": "group_agg_compound", "by": self._by,
-                   "stats": columns, "backend": "pandas"})
+                   "stats": columns, "backend": "polars"})
 
 
 class SafePolarsFrame:
@@ -327,8 +370,8 @@ class SafePolarsFrame:
         """One whole-frame reducer -> a suppressed scalar Released, via the shared
         SafeColumn reducer (identical to the pandas dialect)."""
         from .safeframe import SafeColumn
-        if e._col is not None and e._name is None:   # simple column: fast path
-            series = self._pl.to_pandas()[e._col]
+        if e._col is not None and e._name is None:   # simple column: convert only it
+            series = self._pl.select(e._col).to_pandas().iloc[:, 0]
         else:                                        # derived / aliased: materialize it
             base = e._pre if e._col is None else pl.col(e._col)
             series = self._pl.select(base.alias(e._name or "value")).to_pandas().iloc[:, 0]

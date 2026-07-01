@@ -36,9 +36,24 @@ below). The first slice is implemented and tested:
 - Polars branch in `_build_catalog` — polars sources appear in the schema catalog
   (schema/null_count/height introspection, suppressed counts).
 
-**Not yet:** Milestone 2 (native polars compute — factor the suppressor out of
-`safe.py` into a backend-neutral core, then compute the reduction in polars behind
-the identical facade).
+**Milestone 2 — native polars compute (grouped aggregates): DONE.**
+- `safe.py` split into a pandas *compute* step and a backend-neutral *release*
+  step (`SafeVerbs._release_group_agg`) — the single audited suppressor
+  (protect.suppress + count-noise + audit) for grouped aggregates, whatever
+  backend produced the `(table, counts)`.
+- `polars_api._native_group_agg` computes the per-group aggregate + row counts
+  **in polars** (winsorization included, via linear-interpolation quantiles that
+  match `protect.winsorize` byte-for-byte — verified numerically and by
+  equivalence tests across mean/sum/std/var/median/count, and at the microdata
+  tier with count-noise). Only the small per-group result crosses to pandas; the
+  private per-row frame stays in polars. Audit records `backend="polars"`.
+- Whole-frame scalar `select(reducer)` converts only the single needed column
+  (not the whole frame) and reuses the shared `SafeColumn` reducer.
+
+**Not yet:** native compute for `value_counts`/`crosstab`/`pivot_table` (not yet
+exposed on `SafePolarsFrame`); native whole-column scalar reducers (currently a
+one-column pandas conversion via `SafeColumn`); null group-key parity
+(polars keeps null-key groups; pandas `groupby(observed=True)` drops them).
 
 ## The two axes (keep them separate)
 

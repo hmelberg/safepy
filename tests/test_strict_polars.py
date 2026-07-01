@@ -52,6 +52,37 @@ def test_group_by_len_counts_and_suppresses_small_group():
     assert _as_dict(r.payload)["Z"] is None
 
 
+@pytest.mark.parametrize("stat", ["mean", "sum", "std", "var", "median", "count"])
+def test_group_agg_matches_pandas_across_stats(stat):
+    pandas = _pandas(f"df.groupby('sex')['salary'].{stat}()")
+    polars = _polars("import polars as pl\n"
+                     f"df.group_by('sex').agg(pl.col('salary').{stat}())")
+    assert polars.ok
+    assert _as_dict(polars.payload) == _as_dict(pandas.payload)
+
+
+def test_group_agg_uses_native_polars_backend():
+    # M2: the reduction is computed in polars, not via whole-frame to_pandas
+    r = _polars("import polars as pl\ndf.group_by('sex').agg(pl.col('salary').mean())")
+    assert r.ok and r.audit.get("backend") == "polars"
+
+
+def test_group_by_len_uses_native_polars_backend():
+    r = _polars("df.group_by('region').len()")
+    assert r.ok and r.audit.get("backend") == "polars"
+
+
+def test_group_agg_count_matches_pandas_microdata_tier():
+    # microdata tier turns on count-noise (deterministic, label-keyed) + rounding;
+    # native polars must produce the identical noised/suppressed counts as pandas.
+    p = run("df.groupby('region')['salary'].count()", {"df": PDF},
+            profile=Profile.STRICT, suppression="microdata")
+    q = run("import polars as pl\ndf.group_by('region').agg(pl.col('salary').count())",
+            {"df": PL_DF}, profile=Profile.STRICT, dialect="polars", suppression="microdata")
+    assert q.ok and _as_dict(q.payload) == _as_dict(p.payload)
+    assert _as_dict(q.payload)["Z"] is None          # Z (n=2) suppressed in both
+
+
 def test_count_agg_matches_pandas():
     pandas = _pandas("df.groupby('region')['salary'].count()")
     polars = _polars("import polars as pl\ndf.group_by('region').agg(pl.col('salary').count())")
