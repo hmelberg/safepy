@@ -186,7 +186,26 @@ safestat spec, so it collapses onto m2py's `resolve_policy` when integrated.
    .summary()` via our own whitelisted formula parser (`formula.py`,
    `formula_api.py`) — the user string is validated and reconstructed, never
    handed to patsy; per-coefficient suppression; `.predict`/`.resid` unreachable.
-   Next: coverage sweep against the real script corpus (phase 4).
+   **(done, phase 4)** coverage sweep (`tools/coverage_sweep.py`, 92% of the
+   py2m idiom corpus) + safe wins: `np` constants, `pd.to_numeric`, `corr`,
+   `rename`/`fillna`/`dropna`/`drop`, `a*b` formula interactions.
+   **(done, phase 5)** plotting (`charts.py`): `.plot.bar()/.line()/...` on
+   aggregate results only, `df['x'].hist()` redirected to a suppressed binned
+   frequency; `render=spec|plotly|png|html|ascii` chosen at the API. Raw plotting
+   (`df.plot()`, `.plot.scatter/.box`, `.plot` on a raw column) is refused.
+   Next: winsorized/frequency-checked extremes + safe boxplot (phase 6).
+
+### Plotting model (phase 5)
+
+A chart is a rendering of a `Released` (already-suppressed) aggregate, never of
+raw data. `PlotAccessor` lives on `Released` (`value_counts().plot.bar()`) and
+refuses anything that isn't an aggregated table; there is no `.plot` on a raw
+`SafeFrame`, and a `SafeColumn`'s `.plot` allows only `.hist()`, which is
+redirected to a suppressed binned frequency with round (non-min/max-revealing)
+bin edges. Because the data is already suppressed, plotly/matplotlib embedding
+raw arrays is a non-issue — the only array at plot time is the aggregate. The
+chart *spec* (type + suppressed data) is the security boundary; `render_chart`
+encodes it to the transport the caller asked for.
 3. **(done)** statsmodels (`ols`/`logit`/`poisson`) + lifelines (`cox`/
    `kaplan_meier`) safe verbs, with per-coefficient / at-risk suppression and no
    user formula strings.

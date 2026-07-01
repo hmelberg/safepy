@@ -20,6 +20,13 @@ class Released:
     payload: Any
     audit: dict = field(default_factory=dict)
 
+    @property
+    def plot(self):
+        """pandas-like plotting on an aggregate: value_counts().plot.bar().
+        Refuses anything that isn't an aggregated table."""
+        from .charts import PlotAccessor
+        return PlotAccessor(self)
+
 
 @dataclass
 class SafeResult:

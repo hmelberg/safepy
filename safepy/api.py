@@ -45,13 +45,15 @@ def _build_namespace(profile: Profile, policy: Policy, sources: dict[str, Any]) 
 def run(code: str,
         sources: dict[str, Any],
         level: ProtectionLevel | str = ProtectionLevel.PROTECTED,
-        *, profile: Profile | str | None = None) -> SafeResult:
+        *, profile: Profile | str | None = None,
+        render: str = "spec") -> SafeResult:
     """Validate, run, and disclosure-check ``code`` against ``sources``.
 
     ``sources`` maps the names user code may reference (e.g. ``{"df": frame}``)
     to private data objects. ``level`` selects the protection policy; ``profile``
-    overrides the executor (OPEN sandbox vs STRICT capability) for that policy,
-    which is useful for development and testing.
+    overrides the executor (OPEN sandbox vs STRICT capability) for that policy.
+    ``render`` picks the transport encoding for chart results:
+    ``spec`` (default, JSON) | ``plotly`` | ``png`` | ``html`` | ``ascii``.
     """
     policy: Policy = resolve_policy([level])
     active = Profile(profile) if profile is not None else policy.profile
@@ -70,6 +72,10 @@ def run(code: str,
         result.audit.setdefault("level", policy.level.value)
         result.audit.setdefault("profile", active.value)
         result.audit.setdefault("verbs_used", gate.calls)
+        if result.ok and result.kind == "chart" and render != "spec":
+            from .charts import render_chart
+            result.payload = render_chart(result.payload, render)
+            result.audit["render"] = render
         return result
 
     except ValidationError as exc:

@@ -91,6 +91,42 @@ def _unwrap_val(x):
     return x._s if isinstance(x, SafeColumn) else x
 
 
+def _nice_edges(s, bins):
+    """Equal-width bin edges snapped to round numbers, so exact min/max are not
+    revealed by the boundaries."""
+    import math
+    lo, hi = float(s.min()), float(s.max())
+    if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
+        return [lo, lo + 1]
+    raw = (hi - lo) / max(int(bins), 1)
+    mag = 10 ** math.floor(math.log10(raw)) if raw > 0 else 1
+    step = next((m * mag for m in (1, 2, 2.5, 5, 10) if raw <= m * mag), 10 * mag)
+    start = math.floor(lo / step) * step
+    edges, x = [], start
+    while x <= hi + step * 0.5:
+        edges.append(round(x, 10))
+        x += step
+    return edges
+
+
+class _ColumnPlot:
+    """``SafeColumn.plot`` — only ``.hist()`` (a suppressed binned frequency) is
+    available; other kinds would plot raw values, so they are refused."""
+
+    def __init__(self, col):
+        self._c = col
+
+    def hist(self, bins=10, **kw):
+        return self._c._hist(bins, kw.get("percent", False))
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise DisclosureError(
+            f"plot.{name} on a raw column would reveal individual values; "
+            "aggregate first (e.g. value_counts().plot.bar()) or use .hist()")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 class SafeColumn:
     """A column (pandas Series) that never reveals its values.
@@ -174,6 +210,38 @@ class SafeColumn:
         return Released({"type": "scalar", "stat": stat, "value": value, "n": (None if suppressed else n)},
                         audit={"kind": "scalar", "verb": f"column.{stat}", "min_n": k,
                                "suppressed": suppressed, "backend": "pandas"})
+
+    # -- histogram: a raw-data plot, redirected to a suppressed binned frequency --
+    def hist(self, bins=10, *, percent=False):
+        return self._hist(bins, percent)
+
+    @property
+    def plot(self):
+        return _ColumnPlot(self)
+
+    def _hist(self, bins, percent):
+        from .charts import chart_released
+        s = self._s.dropna()
+        k = self._verbs._policy.min_n
+        edges = list(bins) if isinstance(bins, (list, tuple)) else _nice_edges(s, int(bins))
+        cats = pd.cut(s, bins=edges, include_lowest=True)
+        counts = cats.value_counts().sort_index()
+        total = int(counts.sum())
+        idx = [str(i) for i in counts.index]
+        vals, suppressed = [], 0
+        for v in counts.to_numpy():
+            v = int(v)
+            if v < k:
+                vals.append(None); suppressed += 1
+            elif percent:
+                vals.append(round(100.0 * v / total, 2) if total else None)
+            else:
+                vals.append(v)
+        data = {"type": "series", "name": "percent" if percent else "count",
+                "index": idx, "values": vals}
+        return chart_released("hist", data, {"verb": "hist", "min_n": k,
+                              "bins": len(idx), "bins_suppressed": suppressed,
+                              "backend": "pandas"})
 
     # -- frequency table of this column -> Released table --
     def value_counts(self, *, min_n=None, round=None) -> Released:

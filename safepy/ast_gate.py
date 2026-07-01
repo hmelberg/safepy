@@ -71,8 +71,12 @@ _DENIED_METHODS: frozenset = frozenset({
     # --- accept arbitrary callables / mini-language code ---
     "apply", "applymap", "map", "transform", "pipe", "agg", "aggregate",
     "query", "eval", "rolling", "expanding", "ewm",
-    # --- rendering surfaces that embed raw arrays ---
-    "style", "plot", "hist", "boxplot",
+    # --- rendering surface that embeds raw arrays ---
+    # 'plot'/'hist'/'boxplot' are intentionally NOT here: plotting is enforced by
+    # type instead. It exists only on aggregate results (Released.plot) and, for
+    # hist, on a column where it is redirected to a suppressed binned frequency.
+    # On a raw SafeFrame there is no .plot, so df.plot() is refused by the facade.
+    "style",
 })
 
 # --- bare names / calls that are hard bans (sandbox escapes) -----------------
