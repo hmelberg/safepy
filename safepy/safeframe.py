@@ -211,6 +211,12 @@ class SafeColumn:
     @property
     def dt(self): return _SafeDt(self._s, self._verbs)
 
+    @property
+    def str(self):
+        if pd.api.types.is_numeric_dtype(self._s):
+            raise DisclosureError(".str requires a text column; this column is numeric")
+        return _SafeStr(self._s, self._verbs)
+
     # -- safe reducers -> Released scalar (suppressed if support < min_n) --
     def mean(self): return self._reduce("mean")
     def sum(self): return self._reduce("sum")
@@ -378,7 +384,85 @@ class _SafeDt:
     @property
     def dayofweek(self): return self._part("dayofweek")
     @property
+    def weekday(self): return self._part("dayofweek")
+    @property
+    def dayofyear(self): return self._part("dayofyear")
+    @property
+    def days_in_month(self): return self._part("days_in_month")
+    @property
+    def is_month_start(self): return self._part("is_month_start")
+    @property
+    def is_month_end(self): return self._part("is_month_end")
+    @property
     def hour(self): return self._part("hour")
+    @property
+    def minute(self): return self._part("minute")
+    @property
+    def second(self): return self._part("second")
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise DisclosureError(f"dt.{name} is not available in safepy")
+
+
+class _SafeStr:
+    """A ``.str`` accessor mirroring pandas string functions. Element-wise, so
+    every method returns a private SafeColumn (or a boolean mask). Aggregating
+    forms (e.g. ``.str.cat()`` with no other column, which joins all rows into
+    one string) are not exposed; anything outside the whitelist is refused."""
+
+    def __init__(self, s: pd.Series, verbs: SafeVerbs):
+        self._s = s
+        self._verbs = verbs
+
+    def _col(self, s):
+        return SafeColumn(s, self._verbs)
+
+    # -- substring / indexing --
+    def slice(self, start=None, stop=None, step=None):
+        return self._col(self._s.str.slice(start, stop, step))
+
+    def substr(self, start, length):
+        """microdata-style: `length` chars from position `start` (0-indexed)."""
+        return self._col(self._s.str.slice(start, start + length))
+
+    # -- case / trim --
+    def upper(self): return self._col(self._s.str.upper())
+    def lower(self): return self._col(self._s.str.lower())
+    def title(self): return self._col(self._s.str.title())
+    def capitalize(self): return self._col(self._s.str.capitalize())
+    def strip(self, chars=None): return self._col(self._s.str.strip(chars))
+    def lstrip(self, chars=None): return self._col(self._s.str.lstrip(chars))
+    def rstrip(self, chars=None): return self._col(self._s.str.rstrip(chars))
+
+    # -- length / pad --
+    def len(self): return self._col(self._s.str.len())
+    def pad(self, width, side="left", fillchar=" "):
+        return self._col(self._s.str.pad(width, side=side, fillchar=fillchar))
+    def zfill(self, width): return self._col(self._s.str.zfill(width))
+
+    # -- replace / concat --
+    def replace(self, pat, repl, *, regex=False):
+        return self._col(self._s.str.replace(pat, repl, regex=bool(regex)))
+
+    def cat(self, other, *, sep=""):
+        # element-wise (row-wise) concat only; joining all rows would disclose.
+        if not isinstance(other, SafeColumn):
+            raise DisclosureError("str.cat needs another column to concatenate row-wise")
+        return self._col(self._s.str.cat(other._s, sep=sep))
+
+    # -- search -> boolean mask (regex off by default: literal, and ReDoS-safe) --
+    def contains(self, pat, *, regex=False):
+        return self._col(self._s.str.contains(pat, regex=bool(regex), na=False))
+    def startswith(self, pat): return self._col(self._s.str.startswith(pat, na=False))
+    def endswith(self, pat): return self._col(self._s.str.endswith(pat, na=False))
+    def find(self, sub): return self._col(self._s.str.find(sub))
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise DisclosureError(f"str.{name} is not available in safepy")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

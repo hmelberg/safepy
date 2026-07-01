@@ -45,14 +45,55 @@ class SafeNp:
             return SafeColumn(fn(x._s), x._verbs)
         return float(fn(x))
 
+    def _b(self, a, b, fn):
+        col = a if isinstance(a, SafeColumn) else (b if isinstance(b, SafeColumn) else None)
+        if col is None:
+            return float(fn(a, b))
+        res = fn(_arr(a), _arr(b))
+        if not isinstance(res, pd.Series):
+            res = pd.Series(res, index=col._s.index)
+        return SafeColumn(res, col._verbs)
+
+    # element-wise unary functions
     def log(self, x): return self._u(x, np.log)
+    def log2(self, x): return self._u(x, np.log2)
     def log10(self, x): return self._u(x, np.log10)
     def log1p(self, x): return self._u(x, np.log1p)
     def exp(self, x): return self._u(x, np.exp)
+    def expm1(self, x): return self._u(x, np.expm1)
     def sqrt(self, x): return self._u(x, np.sqrt)
+    def cbrt(self, x): return self._u(x, np.cbrt)
+    def square(self, x): return self._u(x, np.square)
     def abs(self, x): return self._u(x, np.abs)
+    def sign(self, x): return self._u(x, np.sign)
     def floor(self, x): return self._u(x, np.floor)
     def ceil(self, x): return self._u(x, np.ceil)
+    def trunc(self, x): return self._u(x, np.trunc)
+    def rint(self, x): return self._u(x, np.rint)
+    def sin(self, x): return self._u(x, np.sin)
+    def cos(self, x): return self._u(x, np.cos)
+    def tan(self, x): return self._u(x, np.tan)
+    def arcsin(self, x): return self._u(x, np.arcsin)
+    def arccos(self, x): return self._u(x, np.arccos)
+    def arctan(self, x): return self._u(x, np.arctan)
+    def sinh(self, x): return self._u(x, np.sinh)
+    def cosh(self, x): return self._u(x, np.cosh)
+    def tanh(self, x): return self._u(x, np.tanh)
+    def radians(self, x): return self._u(x, np.radians)
+    def degrees(self, x): return self._u(x, np.degrees)
+
+    def round(self, x, decimals=0):
+        if isinstance(x, SafeColumn):
+            return SafeColumn(np.round(x._s, decimals), x._verbs)
+        return float(np.round(x, decimals))
+
+    # element-wise binary functions
+    def minimum(self, a, b): return self._b(a, b, np.minimum)
+    def maximum(self, a, b): return self._b(a, b, np.maximum)
+    def power(self, a, b): return self._b(a, b, np.power)
+    def mod(self, a, b): return self._b(a, b, np.mod)
+    def hypot(self, a, b): return self._b(a, b, np.hypot)
+    def arctan2(self, a, b): return self._b(a, b, np.arctan2)
 
     def where(self, cond, a, b):
         if not isinstance(cond, SafeColumn):
