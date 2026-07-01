@@ -260,8 +260,11 @@ pattern:
 - **Refutation (`df.refute_ate`)** — re-estimate under a placebo treatment / a
   random common cause / a data subset; releases the original vs refuted effect +
   p-value (all aggregate).
-- **Deferred:** *synthetic control* / interrupted time series (CausalPy) — donor
-  weights and per-period counterfactuals need care (weights can be disclosive).
+- **Deferred:** *synthetic control* / interrupted time series — donor weights are
+  the disclosure risk (a concentrated weight reveals a unit). CausalPy is heavy
+  (PyMC); lighter options (pysyncon, synthdid, scpi, or a thin in-house QP) and
+  the safe design are noted in
+  [docs/deferred-synthetic-control.md](docs/deferred-synthetic-control.md).
 
 ## Non-goals (handled elsewhere)
 
