@@ -253,8 +253,15 @@ pattern:
   >= min_n; the input frame is copied so DoWhy never mutates it. (Contrast with
   lifelines/pyfixest, which we *do* expose in native syntax because their fitted
   objects are aggregate-shaped.)
-- **Deferred:** *synthetic control* (donor weights can be disclosive); exposing
-  propensity scores as a private `SafeColumn` (easy follow-on to `ate`).
+- **Propensity scores (`df.propensity`)** — `P(treatment=1 | confounders)` from a
+  logistic model, returned as a **private `SafeColumn`** (aggregate/histogram
+  only). Composes for overlap/common-support: `df.assign(ps=df.propensity(...))
+  .groupby('T')['ps'].mean()`.
+- **Refutation (`df.refute_ate`)** — re-estimate under a placebo treatment / a
+  random common cause / a data subset; releases the original vs refuted effect +
+  p-value (all aggregate).
+- **Deferred:** *synthetic control* / interrupted time series (CausalPy) — donor
+  weights and per-period counterfactuals need care (weights can be disclosive).
 
 ## Non-goals (handled elsewhere)
 

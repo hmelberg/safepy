@@ -40,9 +40,27 @@ _CAT_TERM = re.compile(r"^(?:C\()?(\w+)\)?\[T\.(.+?)\]$")
 
 def _num(v):
     """Float or None (for NaN/inf), JSON-safe."""
-    if v is None or (isinstance(v, float) and not np.isfinite(v)) or pd.isna(v):
+    if v is None:
         return None
+    if isinstance(v, float) and not np.isfinite(v):
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
     return float(v)
+
+
+def _scalar(v):
+    """Coerce a possibly-array-like effect to a single float (None if empty)."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        arr = np.asarray(v, dtype=float).ravel()
+        return float(arr.mean()) if arr.size else None
 
 
 def _validate_idents(*names):
@@ -302,6 +320,36 @@ class StatsMixin:
         "regression": "backdoor.linear_regression",
     }
 
+    _REFUTERS = {
+        "placebo": "placebo_treatment_refuter",
+        "random_common_cause": "random_common_cause",
+        "data_subset": "data_subset_refuter",
+    }
+
+    def _ate_guard(self, df, outcome, treatment, cs, method=None):
+        _validate_idents(outcome, treatment, *cs)
+        for c in [outcome, treatment, *cs]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        if method is not None and method not in self._ATE_METHODS:
+            raise DisclosureError(
+                f"unknown method {method!r}; choose one of {sorted(self._ATE_METHODS)}")
+        counts = df[treatment].value_counts()
+        if len(counts) != 2:
+            raise DisclosureError("treatment must be binary")
+        if int(counts.min()) < self._policy.min_n:
+            raise DisclosureError("a treatment arm is smaller than min_n")
+        return counts
+
+    def _dowhy_fit(self, data, outcome, treatment, cs, method):
+        from dowhy import CausalModel
+        params = {"weighting_scheme": "ips_weight"} if method == "weighting" else None
+        model = CausalModel(data=data, treatment=treatment, outcome=outcome, common_causes=cs)
+        iden = model.identify_effect(proceed_when_unidentifiable=True)
+        est = model.estimate_effect(iden, method_name=self._ATE_METHODS[method],
+                                    method_params=params, confidence_intervals=True)
+        return model, iden, est
+
     def ate(self, df, *, outcome, treatment, confounders, method="weighting"):
         """Average treatment effect under backdoor adjustment (propensity
         weighting/matching/stratification, or regression). Returns only the
@@ -311,34 +359,15 @@ class StatsMixin:
         import io
         import logging
 
-        from dowhy import CausalModel
-
         df = _unwrap(df)
         cs = [confounders] if isinstance(confounders, str) else list(confounders)
-        _validate_idents(outcome, treatment, *cs)
-        for c in [outcome, treatment, *cs]:
-            if c not in df.columns:
-                raise DisclosureError(f"unknown column: {c}")
-        if method not in self._ATE_METHODS:
-            raise DisclosureError(
-                f"unknown method {method!r}; choose one of {sorted(self._ATE_METHODS)}")
-
+        counts = self._ate_guard(df, outcome, treatment, cs, method)
         k = self._policy.min_n
-        counts = df[treatment].value_counts()
-        if len(counts) != 2:
-            raise DisclosureError("treatment must be binary")
-        if int(counts.min()) < k:
-            raise DisclosureError("a treatment arm is smaller than min_n")
 
         logging.getLogger("dowhy").setLevel(logging.ERROR)
         data = df[[outcome, treatment, *cs]].copy()  # DoWhy mutates its input
-        params = {"weighting_scheme": "ips_weight"} if method == "weighting" else None
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            model = CausalModel(data=data, treatment=treatment, outcome=outcome,
-                                common_causes=cs)
-            iden = model.identify_effect(proceed_when_unidentifiable=True)
-            est = model.estimate_effect(iden, method_name=self._ATE_METHODS[method],
-                                        method_params=params, confidence_intervals=True)
+            _, _, est = self._dowhy_fit(data, outcome, treatment, cs, method)
             try:
                 lo, hi = est.get_confidence_intervals()
             except Exception:
@@ -355,6 +384,72 @@ class StatsMixin:
              "groups": {str(v): int(c) for v, c in counts.items()}},
             audit={"kind": "causal", "verb": "ate", "method": method, "min_n": k,
                    "backend": "dowhy"})
+
+    def refute_ate(self, df, *, outcome, treatment, confounders,
+                   method="weighting", refuter="placebo"):
+        """Robustness check on an ATE: re-estimate under a refuter (placebo
+        treatment, a random common cause, or a data subset) and report the
+        original vs refuted effect + p-value. All aggregate."""
+        import contextlib
+        import io
+        import logging
+
+        df = _unwrap(df)
+        cs = [confounders] if isinstance(confounders, str) else list(confounders)
+        if refuter not in self._REFUTERS:
+            raise DisclosureError(
+                f"unknown refuter {refuter!r}; choose one of {sorted(self._REFUTERS)}")
+        self._ate_guard(df, outcome, treatment, cs, method)
+        k = self._policy.min_n
+
+        logging.getLogger("dowhy").setLevel(logging.ERROR)
+        data = df[[outcome, treatment, *cs]].copy()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            model, iden, est = self._dowhy_fit(data, outcome, treatment, cs, method)
+            ref = model.refute_estimate(iden, est, method_name=self._REFUTERS[refuter])
+
+        p = None
+        rr = getattr(ref, "refutation_result", None)
+        if isinstance(rr, dict):
+            p = rr.get("p_value")
+        return Released(
+            {"type": "causal_refutation", "refuter": refuter, "method": method,
+             "estimated_effect": _num(_scalar(ref.estimated_effect)),
+             "new_effect": _num(_scalar(ref.new_effect)), "p_value": _num(_scalar(p))},
+            audit={"kind": "causal", "verb": "refute_ate", "refuter": refuter,
+                   "min_n": k, "backend": "dowhy"})
+
+    def propensity(self, df, *, treatment, confounders):
+        """Propensity score P(treatment=1 | confounders) as a private SafeColumn
+        (aggregate/histogram only, never revealed per unit). Composes with
+        assign for overlap plots: df.assign(ps=df.propensity(...))."""
+        import statsmodels.api as sm
+
+        from .safeframe import SafeColumn
+        df = _unwrap(df)
+        cs = [confounders] if isinstance(confounders, str) else list(confounders)
+        _validate_idents(treatment, *cs)
+        for c in [treatment, *cs]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        counts = df[treatment].value_counts()
+        if len(counts) != 2:
+            raise DisclosureError("treatment must be binary")
+        if int(counts.min()) < self._policy.min_n:
+            raise DisclosureError("a treatment arm is smaller than min_n")
+
+        pieces, _ = self._numeric_design(df, cs)
+        if not pieces:
+            raise DisclosureError("no usable confounders")
+        X = sm.add_constant(pd.DataFrame(pieces, index=df.index).astype(float))
+        vals = sorted(counts.index)
+        ybin = df[treatment].map({vals[0]: 0, vals[1]: 1}).astype(float)
+        try:
+            model = sm.Logit(ybin, X).fit(disp=0)
+        except Exception:
+            raise DisclosureError("the propensity model failed to converge")
+        ps = pd.Series(np.asarray(model.predict(X)), index=df.index, name="propensity")
+        return SafeColumn(ps, self)
 
     # ---- restricted mean survival time (lifelines) -------------------------
 

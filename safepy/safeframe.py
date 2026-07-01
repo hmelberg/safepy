@@ -594,6 +594,16 @@ class SafeFrame:
         return self._verbs.ate(self._df, outcome=outcome, treatment=treatment,
                                confounders=confounders, method=method, **kw)
 
+    def refute_ate(self, *, outcome, treatment, confounders, method="weighting",
+                   refuter="placebo", **kw) -> Released:
+        return self._verbs.refute_ate(self._df, outcome=outcome, treatment=treatment,
+                                      confounders=confounders, method=method,
+                                      refuter=refuter, **kw)
+
+    def propensity(self, *, treatment, confounders, **kw):
+        return self._verbs.propensity(self._df, treatment=treatment,
+                                      confounders=confounders, **kw)
+
     def __len__(self):
         raise DisclosureError("len() on a frame is not allowed; use a count aggregation")
 
