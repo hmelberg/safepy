@@ -41,14 +41,55 @@ except ImportError:  # pragma: no cover
     protect = None
 
 # ── assign() expression compiler (trusted, whitelisted — never eval) ──────────
-_EXPR_FUNCS = {
-    "log": np.log, "log10": np.log10, "exp": np.exp, "sqrt": np.sqrt,
-    "abs": np.abs, "floor": np.floor, "ceil": np.ceil,
+# Mirrors the SafeColumn/np/str surface so microdata-style string expressions
+# (assign('y', 'log(x)'), assign('c', 'substr(muni, 0, 2)')) match the pandas
+# path. Every element is element-wise -> a column; nothing aggregates or reveals.
+def _f_where(c, a, b):
+    idx = getattr(c, "index", None)
+    idx = idx if idx is not None else getattr(a, "index", getattr(b, "index", None))
+    val = lambda v: v.to_numpy() if hasattr(v, "to_numpy") else v
+    return pd.Series(np.where(val(c), val(a), val(b)), index=idx)
+
+
+_EXPR_CALLS = {
+    # unary math
+    **{n: (lambda f: (lambda a: f(a)))(getattr(np, m)) for n, m in {
+        "log": "log", "log2": "log2", "log10": "log10", "log1p": "log1p",
+        "exp": "exp", "expm1": "expm1", "sqrt": "sqrt", "cbrt": "cbrt",
+        "square": "square", "abs": "abs", "sign": "sign", "floor": "floor",
+        "ceil": "ceil", "trunc": "trunc", "rint": "rint", "sin": "sin",
+        "cos": "cos", "tan": "tan", "sinh": "sinh", "cosh": "cosh",
+        "tanh": "tanh", "radians": "radians", "degrees": "degrees",
+    }.items()},
+    # multi-arg math
+    "minimum": lambda a, b: np.minimum(a, b),
+    "maximum": lambda a, b: np.maximum(a, b),
+    "power": lambda a, b: np.power(a, b),
+    "mod": lambda a, b: np.mod(a, b),
+    "round": lambda a, n=0: np.round(a, int(n)),
+    "where": _f_where,
+    # string functions (element-wise)
+    "substr": lambda s, start, length: s.str.slice(int(start), int(start) + int(length)),
+    "upper": lambda s: s.str.upper(),
+    "lower": lambda s: s.str.lower(),
+    "title": lambda s: s.str.title(),
+    "strip": lambda s: s.str.strip(),
+    "strlen": lambda s: s.str.len(),
+    "zfill": lambda s, w: s.str.zfill(int(w)),
+    "replace": lambda s, a, b: s.str.replace(a, b, regex=False),
+    "concat": lambda a, b: a.astype(str).str.cat(b.astype(str)),
 }
 _EXPR_OPS = {
     ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
     ast.Mult: lambda a, b: a * b, ast.Div: lambda a, b: a / b,
     ast.Mod: lambda a, b: a % b, ast.Pow: lambda a, b: a ** b,
+    ast.FloorDiv: lambda a, b: a // b,
+    ast.BitAnd: lambda a, b: a & b, ast.BitOr: lambda a, b: a | b,
+}
+_EXPR_CMP = {
+    ast.Gt: lambda a, b: a > b, ast.Lt: lambda a, b: a < b,
+    ast.GtE: lambda a, b: a >= b, ast.LtE: lambda a, b: a <= b,
+    ast.Eq: lambda a, b: a == b, ast.NotEq: lambda a, b: a != b,
 }
 _CMP_OPS = {
     ">": lambda a, b: a > b, "<": lambda a, b: a < b,
@@ -71,7 +112,7 @@ def _compile_expr(df: pd.DataFrame, expr: str):
     def ev(node):
         if isinstance(node, ast.Expression):
             return ev(node.body)
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float, str, bool)):
             return node.value
         if isinstance(node, ast.Name):
             if node.id not in df.columns:
@@ -79,11 +120,27 @@ def _compile_expr(df: pd.DataFrame, expr: str):
             return df[node.id]
         if isinstance(node, ast.BinOp) and type(node.op) in _EXPR_OPS:
             return _EXPR_OPS[type(node.op)](ev(node.left), ev(node.right))
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            return -ev(node.operand)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
-                and node.func.id in _EXPR_FUNCS and len(node.args) == 1 and not node.keywords:
-            return _EXPR_FUNCS[node.func.id](ev(node.args[0]))
+        if isinstance(node, ast.Compare) and len(node.ops) == 1 and type(node.ops[0]) in _EXPR_CMP:
+            return _EXPR_CMP[type(node.ops[0])](ev(node.left), ev(node.comparators[0]))
+        if isinstance(node, ast.BoolOp):
+            vals = [ev(v) for v in node.values]
+            acc = vals[0]
+            for v in vals[1:]:
+                acc = (acc & v) if isinstance(node.op, ast.And) else (acc | v)
+            return acc
+        if isinstance(node, ast.UnaryOp):
+            if isinstance(node.op, ast.USub):
+                return -ev(node.operand)
+            if isinstance(node.op, (ast.Invert, ast.Not)):
+                return ~ev(node.operand)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not node.keywords:
+            fn = _EXPR_CALLS.get(node.func.id)
+            if fn is None:
+                raise DisclosureError(f"function '{node.func.id}' is not available in assign()")
+            try:
+                return fn(*[ev(a) for a in node.args])
+            except (TypeError, AttributeError):
+                raise DisclosureError(f"invalid arguments to '{node.func.id}' in assign()")
         raise DisclosureError("unsupported expression element in assign()")
 
     return ev(tree.body)
@@ -367,11 +424,19 @@ class _SafeDt:
     """A minimal ``.dt`` accessor: returns derived SafeColumns, never values."""
 
     def __init__(self, s: pd.Series, verbs: SafeVerbs):
-        self._s = pd.to_datetime(s)
+        # keep datetime/timedelta as-is (so `d1 - d2` -> .dt.days works); coerce
+        # strings to datetime.
+        if pd.api.types.is_datetime64_any_dtype(s) or pd.api.types.is_timedelta64_dtype(s):
+            self._s = s
+        else:
+            self._s = pd.to_datetime(s)
         self._verbs = verbs
 
     def _part(self, name):
         return SafeColumn(getattr(self._s.dt, name), self._verbs)
+
+    @property
+    def days(self): return self._part("days")             # for a timedelta column
 
     @property
     def year(self): return self._part("year")
