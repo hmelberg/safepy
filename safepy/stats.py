@@ -293,6 +293,69 @@ class StatsMixin:
             audit={"kind": "regression", "verb": family, "min_n": k,
                    "terms_suppressed": suppressed, "backend": "pyfixest"})
 
+    # ---- average treatment effect via propensity methods (DoWhy) -----------
+
+    _ATE_METHODS = {
+        "weighting": "backdoor.propensity_score_weighting",
+        "matching": "backdoor.propensity_score_matching",
+        "stratification": "backdoor.propensity_score_stratification",
+        "regression": "backdoor.linear_regression",
+    }
+
+    def ate(self, df, *, outcome, treatment, confounders, method="weighting"):
+        """Average treatment effect under backdoor adjustment (propensity
+        weighting/matching/stratification, or regression). Returns only the
+        aggregate effect + CI; matched pairs and per-unit propensity scores are
+        never exposed. Treatment must be binary and each arm >= min_n."""
+        import contextlib
+        import io
+        import logging
+
+        from dowhy import CausalModel
+
+        df = _unwrap(df)
+        cs = [confounders] if isinstance(confounders, str) else list(confounders)
+        _validate_idents(outcome, treatment, *cs)
+        for c in [outcome, treatment, *cs]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        if method not in self._ATE_METHODS:
+            raise DisclosureError(
+                f"unknown method {method!r}; choose one of {sorted(self._ATE_METHODS)}")
+
+        k = self._policy.min_n
+        counts = df[treatment].value_counts()
+        if len(counts) != 2:
+            raise DisclosureError("treatment must be binary")
+        if int(counts.min()) < k:
+            raise DisclosureError("a treatment arm is smaller than min_n")
+
+        logging.getLogger("dowhy").setLevel(logging.ERROR)
+        data = df[[outcome, treatment, *cs]].copy()  # DoWhy mutates its input
+        params = {"weighting_scheme": "ips_weight"} if method == "weighting" else None
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            model = CausalModel(data=data, treatment=treatment, outcome=outcome,
+                                common_causes=cs)
+            iden = model.identify_effect(proceed_when_unidentifiable=True)
+            est = model.estimate_effect(iden, method_name=self._ATE_METHODS[method],
+                                        method_params=params, confidence_intervals=True)
+            try:
+                lo, hi = est.get_confidence_intervals()
+            except Exception:
+                lo = hi = None
+            try:
+                se = est.get_standard_error()
+            except Exception:
+                se = None
+
+        return Released(
+            {"type": "causal_estimate", "estimand": "ate", "method": method,
+             "effect": _num(est.value), "ci_low": _num(lo), "ci_high": _num(hi),
+             "se": _num(se), "n": int(df.shape[0]),
+             "groups": {str(v): int(c) for v, c in counts.items()}},
+            audit={"kind": "causal", "verb": "ate", "method": method, "min_n": k,
+                   "backend": "dowhy"})
+
     # ---- restricted mean survival time (lifelines) -------------------------
 
     def rmst(self, df, *, duration, event, t, by=None):

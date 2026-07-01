@@ -590,6 +590,10 @@ class SafeFrame:
         return self._verbs.iv(self._df, y=y, x=x, endog=endog, instruments=instruments,
                               fe=fe, cluster=cluster, **kw)
 
+    def ate(self, *, outcome, treatment, confounders, method="weighting", **kw) -> Released:
+        return self._verbs.ate(self._df, outcome=outcome, treatment=treatment,
+                               confounders=confounders, method=method, **kw)
+
     def __len__(self):
         raise DisclosureError("len() on a frame is not allowed; use a count aggregation")
 

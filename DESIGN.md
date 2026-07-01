@@ -244,10 +244,17 @@ pattern:
   column names (never a user string → no formulaic eval); categorical covariates
   are one-hot encoded with sub-`min_n` levels dropped; fixed effects are absorbed
   (never reported); results are coefficient tables with per-term suppression.
-- **Deferred (per-unit-heavy):** propensity-score *matching* (matched pairs are
-  unit-to-unit links — release only the aggregate ATT; propensity scores as a
-  private `SafeColumn`) and *synthetic control* (donor weights can be
-  disclosive). Wrap a narrow DoWhy/CausalPy slice when needed.
+- **Average treatment effect (DoWhy)** — `df.ate(outcome=, treatment=,
+  confounders=[], method='weighting'|'matching'|'stratification'|'regression')`.
+  A *curated verb*, not a library-mimicking facade: DoWhy's raw `CausalModel`
+  API is deliberately **not** importable, because its multi-step flow exposes
+  per-unit internals (propensity scores, matched sets). We release only the
+  aggregate effect + CI + SE + arm sizes; treatment must be binary with each arm
+  >= min_n; the input frame is copied so DoWhy never mutates it. (Contrast with
+  lifelines/pyfixest, which we *do* expose in native syntax because their fitted
+  objects are aggregate-shaped.)
+- **Deferred:** *synthetic control* (donor weights can be disclosive); exposing
+  propensity scores as a private `SafeColumn` (easy follow-on to `ate`).
 
 ## Non-goals (handled elsewhere)
 
