@@ -648,6 +648,145 @@ class StatsMixin:
             audit={"kind": "test", "verb": "logrank", "min_n": k,
                    "groups_dropped": int((sizes < k).sum()), "backend": "lifelines"})
 
+    # ---- hypothesis tests (scipy.stats) ------------------------------------
+    # Test statistics and p-values are aggregates: safe to release once every
+    # contributing group has >= min_n observations.
+
+    def _numeric_col(self, df, name):
+        if not pd.api.types.is_numeric_dtype(df[name]):
+            raise DisclosureError(f"'{name}' must be numeric for this test")
+
+    def _two_groups(self, df, value, by):
+        k = self._policy.min_n
+        grouped = df.dropna(subset=[value]).groupby(by, observed=True)[value]
+        sizes = grouped.size()
+        if len(sizes) != 2:
+            raise DisclosureError(f"'{by}' must have exactly 2 groups (has {len(sizes)})")
+        if int(sizes.min()) < k:
+            raise DisclosureError("a group is smaller than min_n")
+        arrs = [g.to_numpy() for _, g in grouped]
+        return arrs[0], arrs[1], sizes
+
+    def _test_result(self, name, stat, p, *, n, **extra):
+        return Released(
+            {"type": "test", "test": name, "statistic": _num(stat),
+             "p_value": _num(p), "n": int(n), **extra},
+            audit={"kind": "test", "verb": name, "min_n": self._policy.min_n,
+                   "backend": "scipy"})
+
+    def ttest(self, df, *, value, by=None, mu=0.0):
+        from scipy import stats
+        df = _unwrap(df)
+        _validate_idents(value, *([by] if by else []))
+        for c in [value, *([by] if by else [])]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        self._numeric_col(df, value)
+        if by is None:
+            s = df[value].dropna()
+            if len(s) < self._policy.min_n:
+                raise DisclosureError("sample smaller than min_n")
+            t, p = stats.ttest_1samp(s, float(mu))
+            return self._test_result("one-sample t", t, p, n=len(s), df=len(s) - 1)
+        a, b, sizes = self._two_groups(df, value, by)
+        t, p = stats.ttest_ind(a, b, equal_var=False)  # Welch
+        return self._test_result("two-sample t (Welch)", t, p, n=int(sizes.sum()),
+                                 groups={str(k): int(v) for k, v in sizes.items()})
+
+    def mannwhitney(self, df, *, value, by):
+        from scipy import stats
+        df = _unwrap(df)
+        _validate_idents(value, by)
+        for c in [value, by]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        self._numeric_col(df, value)
+        a, b, sizes = self._two_groups(df, value, by)
+        u, p = stats.mannwhitneyu(a, b, alternative="two-sided")
+        return self._test_result("Mann-Whitney U", u, p, n=int(sizes.sum()),
+                                 groups={str(k): int(v) for k, v in sizes.items()})
+
+    def anova(self, df, *, value, by):
+        from scipy import stats
+        df = _unwrap(df)
+        _validate_idents(value, by)
+        for c in [value, by]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        self._numeric_col(df, value)
+        k = self._policy.min_n
+        grouped = df.dropna(subset=[value]).groupby(by, observed=True)[value]
+        sizes = grouped.size()
+        if len(sizes) < 2:
+            raise DisclosureError("need at least 2 groups")
+        if int(sizes.min()) < k:
+            raise DisclosureError("a group is smaller than min_n")
+        f, p = stats.f_oneway(*[g.to_numpy() for _, g in grouped])
+        return self._test_result(
+            "one-way ANOVA", f, p, n=int(sizes.sum()),
+            df={"between": len(sizes) - 1, "within": int(sizes.sum()) - len(sizes)})
+
+    def chisq(self, df, *, row, col):
+        from scipy import stats
+        df = _unwrap(df)
+        _validate_idents(row, col)
+        for c in [row, col]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        k = self._policy.min_n
+        tab = pd.crosstab(df[row], df[col])
+        if (tab.sum(axis=1) < k).any() or (tab.sum(axis=0) < k).any():
+            raise DisclosureError("a category margin is smaller than min_n")
+        chi2, p, dof, _ = stats.chi2_contingency(tab)  # table itself not released
+        return self._test_result("chi-square", chi2, p, n=int(tab.to_numpy().sum()), df=int(dof))
+
+    def corr_test(self, df, *, x, y, method="pearson"):
+        from scipy import stats
+        df = _unwrap(df)
+        _validate_idents(x, y)
+        for c in [x, y]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        self._numeric_col(df, x); self._numeric_col(df, y)
+        d = df[[x, y]].dropna()
+        if len(d) < self._policy.min_n:
+            raise DisclosureError("sample smaller than min_n")
+        if method == "pearson":
+            r, p = stats.pearsonr(d[x], d[y])
+        elif method == "spearman":
+            r, p = stats.spearmanr(d[x], d[y])
+        else:
+            raise DisclosureError(f"unknown method {method!r} (pearson/spearman)")
+        return self._test_result(f"{method} correlation", r, p, n=len(d))
+
+    # ---- grouped describe --------------------------------------------------
+
+    def group_describe(self, df, by, value):
+        from .safeframe import _order_stat  # lazy: avoids an import cycle
+        df = _unwrap(df)
+        _validate_idents(value)
+        if value not in df.columns:
+            raise DisclosureError(f"unknown column: {value}")
+        self._numeric_col(df, value)
+        k = self._policy.min_n
+        cols = ["count", "mean", "std", "min", "25%", "50%", "75%", "max"]
+        index, data = [], []
+        for gname, sub in df.dropna(subset=[value]).groupby(by, observed=True):
+            s = sub[value]
+            index.append(str(gname))
+            if len(s) < k:
+                data.append([None] * len(cols))  # whole group suppressed
+                continue
+            data.append([
+                len(s), _num(s.mean()), _num(s.std()),
+                _order_stat(s, "min", k)[0], _order_stat(s, "q", k, q=0.25)[0],
+                _order_stat(s, "q", k, q=0.50)[0], _order_stat(s, "q", k, q=0.75)[0],
+                _order_stat(s, "max", k)[0],
+            ])
+        return Released({"type": "frame", "columns": cols, "index": index, "data": data},
+                        audit={"kind": "table", "verb": "group_describe", "min_n": k,
+                               "backend": "pandas"})
+
     # ---- shared release path ----------------------------------------------
 
     def _support(self, terms, df, xs, n):

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from .errors import DisclosureError
 from .formula import parse_formula
+from .result import Released
 
 _FITTERS = ("ols", "logit", "poisson")
 
@@ -80,6 +81,33 @@ class SafeResults:
     # SafeColumn (like any private column, e.g. salary), so you can aggregate or
     # histogram them but never see individual values. A bare .predict() is a
     # dangling SafeColumn and is refused by the mediator.
+    def margeff(self, **kw):
+        """Average marginal effects (logit/poisson/probit). Aggregate, with the
+        same per-term suppression as the coefficients."""
+        from .stats import _num
+        m = self._fitted
+        if not hasattr(m, "get_margeff"):
+            raise DisclosureError("marginal effects are not available for this model")
+        mf = m.get_margeff().summary_frame()
+        support = self._verbs._support(mf.index, self._df, self._base, int(m.nobs))
+        k = self._verbs._policy.min_n
+        rows, suppressed = [], []
+        for term, row in mf.iterrows():
+            blank = support.get(str(term), int(m.nobs)) < k
+            rows.append({
+                "term": str(term),
+                "dydx": None if blank else _num(row.get("dy/dx")),
+                "se": None if blank else _num(row.get("Std. Err.")),
+                "pvalue": None if blank else _num(row.get("Pr(>|z|)")),
+            })
+            if blank:
+                suppressed.append(str(term))
+        return Released(
+            {"type": "marginal_effects", "family": self._family, "n": int(m.nobs),
+             "terms": rows},
+            audit={"kind": "regression", "verb": "margeff", "min_n": k,
+                   "terms_suppressed": suppressed, "backend": "statsmodels"})
+
     def predict(self, **kw):
         return self._as_column(self._fitted.predict(), "predicted")
 

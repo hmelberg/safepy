@@ -393,6 +393,9 @@ class SafeSeriesGroupBy:
     def var(self, **kw): return self._agg("var", **kw)
     def size(self, **kw): return self._agg("size", **kw)
 
+    def describe(self, **kw):
+        return self._verbs.group_describe(self._df, self._by, self._value)
+
     def _agg(self, agg, **kw):
         return self._verbs.group_agg(self._df, self._by, self._value, agg, **kw)
 
@@ -529,6 +532,22 @@ class SafeFrame:
 
     def crosstab(self, row: str, col: str, **kw) -> Released:
         return self._verbs.crosstab(self._df, row, col, **kw)
+
+    # -- hypothesis tests --
+    def ttest(self, *, value, by=None, mu=0.0, **kw) -> Released:
+        return self._verbs.ttest(self._df, value=value, by=by, mu=mu, **kw)
+
+    def mannwhitney(self, *, value, by, **kw) -> Released:
+        return self._verbs.mannwhitney(self._df, value=value, by=by, **kw)
+
+    def anova(self, *, value, by, **kw) -> Released:
+        return self._verbs.anova(self._df, value=value, by=by, **kw)
+
+    def chisq(self, *, row, col, **kw) -> Released:
+        return self._verbs.chisq(self._df, row=row, col=col, **kw)
+
+    def corr_test(self, *, x, y, method="pearson", **kw) -> Released:
+        return self._verbs.corr_test(self._df, x=x, y=y, method=method, **kw)
 
     def corr(self, **kw) -> Released:
         """Correlation matrix over numeric columns (aggregate; released only if
