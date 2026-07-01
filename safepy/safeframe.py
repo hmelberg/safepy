@@ -559,6 +559,9 @@ class SafeFrame:
     def kaplan_meier(self, *, duration, event, by=None, **kw) -> Released:
         return self._verbs.kaplan_meier(self._df, duration=duration, event=event, by=by, **kw)
 
+    def logrank(self, *, duration, event, by, **kw) -> Released:
+        return self._verbs.logrank(self._df, duration=duration, event=event, by=by, **kw)
+
     def __len__(self):
         raise DisclosureError("len() on a frame is not allowed; use a count aggregation")
 

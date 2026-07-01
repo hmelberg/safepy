@@ -163,6 +163,8 @@ class StatsMixin:
                                "min_n": k, "by": by, "backend": "lifelines"})
 
     def _km_curve(self, durations, events, k):
+        import math
+
         from lifelines import KaplanMeierFitter
 
         kmf = KaplanMeierFitter().fit(durations, events)
@@ -176,7 +178,41 @@ class StatsMixin:
             if at_risk >= k:
                 times.append(_num(t))
                 surv.append(_num(sf.loc[t].iloc[0]))
-        return {"time": times, "survival": surv}
+        # median survival time: released only if the risk set there is >= min_n
+        median = None
+        med = float(kmf.median_survival_time_)
+        if math.isfinite(med):
+            rows = et[et.index <= med]
+            if len(rows) and int(rows["at_risk"].iloc[-1]) >= k:
+                median = _num(med)
+        return {"time": times, "survival": surv, "median": median}
+
+    # ---- log-rank test: compare survival between groups --------------------
+
+    def logrank(self, df, *, duration, event, by):
+        from lifelines.statistics import multivariate_logrank_test
+
+        df = _unwrap(df)
+        _validate_idents(duration, event, by)
+        for c in (duration, event, by):
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        k = self._policy.min_n
+
+        sizes = df.groupby(by, observed=True).size()
+        keep = sizes[sizes >= k].index
+        sub = df[df[by].isin(keep)]
+        if sub[by].nunique() < 2:
+            raise DisclosureError("log-rank needs >= 2 groups each with >= min_n members")
+
+        res = multivariate_logrank_test(sub[duration], sub[by], sub[event])
+        return Released(
+            {"type": "test", "test": "logrank",
+             "statistic": _num(res.test_statistic), "p_value": _num(res.p_value),
+             "df": int(sub[by].nunique() - 1),
+             "groups": {str(g): int(n) for g, n in sizes.items() if n >= k}},
+            audit={"kind": "test", "verb": "logrank", "min_n": k,
+                   "groups_dropped": int((sizes < k).sum()), "backend": "lifelines"})
 
     # ---- shared release path ----------------------------------------------
 
