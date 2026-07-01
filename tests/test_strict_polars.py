@@ -221,6 +221,28 @@ def test_compound_agg_mixed_columns_with_alias():
     assert "avg" in r.payload["columns"]
 
 
+# ---- lazy frames ------------------------------------------------------------
+
+def test_lazyframe_source_group_agg_matches_eager():
+    code = ("import polars as pl\n"
+            "df.filter(pl.col('salary') >= 40000).group_by('sex').agg(pl.col('salary').mean())")
+    eager = _polars(code)
+    lazy = run(code, {"df": PL_DF.lazy()}, profile=Profile.STRICT, dialect="polars")
+    assert lazy.ok and _as_dict(lazy.payload) == _as_dict(eager.payload)
+
+
+def test_lazyframe_source_in_catalog():
+    r = run("import polars as pl\ndf.group_by('sex').agg(pl.col('salary').mean())",
+            {"df": PL_DF.lazy()}, profile=Profile.STRICT, dialect="polars")
+    cat = {c["name"]: c for c in (r.catalog or [])}
+    assert "df" in cat and cat["df"]["n_rows"] is not None and cat["df"]["n_columns"] == 5
+
+
+def test_lazyframe_delegated_verb():
+    r = run("df.corr()", {"df": PL_DF.lazy()}, profile=Profile.STRICT, dialect="polars")
+    assert r.ok
+
+
 # ---- schema catalog ---------------------------------------------------------
 
 def test_catalog_includes_polars_source():
@@ -233,6 +255,43 @@ def test_catalog_includes_polars_source():
     cols = {c["name"]: c for c in df_cat["columns"]}
     assert {"pid", "name", "sex", "region", "salary"} == set(cols)
     assert cols["salary"]["n_missing"] == 0        # no missing -> reported as 0
+
+
+# ---- delegated model / stat verbs (mirror the pandas SafeFrame surface) ------
+
+def test_ols_matches_pandas():
+    pandas = _pandas("df.ols(y='salary', x=['pid'])")
+    polars = _polars("df.ols(y='salary', x=['pid'])")
+    assert polars.ok and polars.payload == pandas.payload
+
+
+def test_corr_matches_pandas():
+    pandas = _pandas("df.corr()")
+    polars = _polars("df.corr()")
+    assert polars.ok and polars.payload == pandas.payload
+
+
+def test_describe_matches_pandas():
+    pandas = _pandas("df.describe()")
+    polars = _polars("df.describe()")
+    assert polars.ok and polars.payload == pandas.payload
+
+
+def test_frame_mean_reducer_delegates():
+    r = _polars("df.mean()")
+    assert r.ok and r.payload["type"] == "series"
+    assert "salary" in r.payload["index"]
+
+
+def test_plot_on_polars_aggregate():
+    r = _polars("import polars as pl\n"
+                "df.group_by('sex').agg(pl.col('salary').mean()).plot.bar()")
+    assert r.ok and r.kind == "chart"
+
+
+def test_non_whitelisted_frame_method_still_refused():
+    # a non-terminal / unknown method is not delegated -> refused
+    assert _polars("df.assign(x=1)").ok is False
 
 
 # ---- the facade is the boundary: intermediates and disclosive verbs refused --

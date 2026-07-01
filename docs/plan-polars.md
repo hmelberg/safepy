@@ -50,10 +50,27 @@ below). The first slice is implemented and tested:
 - Whole-frame scalar `select(reducer)` converts only the single needed column
   (not the whole frame) and reuses the shared `SafeColumn` reducer.
 
-**Not yet:** native compute for `value_counts`/`crosstab`/`pivot_table` (not yet
-exposed on `SafePolarsFrame`); native whole-column scalar reducers (currently a
-one-column pandas conversion via `SafeColumn`); null group-key parity
-(polars keeps null-key groups; pandas `groupby(observed=True)` drops them).
+**Breadth: model / stat verbs + charting + lazy.**
+- The terminal (Released-returning) verbs of the pandas `SafeFrame` are delegated
+  from `SafePolarsFrame` via an explicit whitelist (`_DELEGATED_VERBS`): `ols`,
+  `logit`, `poisson`, `cox`, `kaplan_meier`, `logrank`, the AFT models, `rmst`,
+  `feols`, `iv`, `ate`, `refute_ate`, `synthetic_control`, `corr`, `cov`,
+  `describe`, the hypothesis tests, `value_counts`/`crosstab`/`pivot_table`, and
+  the per-column frame reducers. Each converts the frame to pandas once and calls
+  the already-audited verb. Intermediate-returning verbs (`assign`/`where`/
+  `groupby`/`merge`/…) and `propensity` (returns a private column) are excluded —
+  the facade stays the boundary.
+- `.plot` works on any polars aggregate for free (`Released.plot`), e.g.
+  `df.group_by('sex').agg(pl.col('salary').mean()).plot.bar()`.
+- **Lazy frames:** a `pl.LazyFrame` source is supported — shaping stays lazy, and
+  the frame is `.collect()`-ed only at the conversion boundary (native aggregate,
+  scalar, delegated verb, catalog). Schema introspection uses `collect_schema()`.
+
+**Not yet:** native compute for `value_counts`/`crosstab`/`pivot_table` (they
+delegate to pandas today); native whole-column scalar reducers (one-column pandas
+conversion via `SafeColumn`); null group-key parity (polars keeps null-key groups;
+pandas `groupby(observed=True)` drops them); query-plan introspection off the
+LazyFrame plan (the audit-friendly win the lazy seam now enables).
 
 ## The two axes (keep them separate)
 

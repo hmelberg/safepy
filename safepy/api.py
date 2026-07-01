@@ -154,12 +154,9 @@ def _build_catalog(ns: dict, policy: Policy) -> list:
             cols = [(str(c), str(d[c].dtype), int(d[c].isna().sum())) for c in d.columns]
             n_rows = len(d)
         elif getattr(val, "_is_polars_safeframe", False):
-            # polars source: introspect the real polars frame (no polars import
-            # needed here — val._pl already is one). null_count() -> a 1-row frame.
-            p = val._pl
-            nulls = dict(zip(p.columns, p.null_count().row(0)))
-            cols = [(str(c), str(dt), int(nulls[c])) for c, dt in p.schema.items()]
-            n_rows = p.height
+            # polars source (eager or lazy): the facade introspects its own frame,
+            # so api.py stays decoupled from polars specifics.
+            n_rows, cols = val._catalog_raw()
         else:
             continue
         columns = [{"name": c, "dtype": dt, "n_missing": count(nm)} for c, dt, nm in cols]

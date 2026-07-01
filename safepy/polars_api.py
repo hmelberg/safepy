@@ -36,6 +36,18 @@ _SAFE_REDUCERS = frozenset({"mean", "sum", "count", "median", "std", "var"})
 _WINSOR_AGGS = frozenset({"mean", "std", "var", "sum"})
 
 
+def _eager(frame):
+    """Materialize a LazyFrame; pass an eager frame through. Shaping stays lazy;
+    we collect only at the conversion boundary (native aggregate / to_pandas)."""
+    return frame.collect() if isinstance(frame, pl.LazyFrame) else frame
+
+
+def _schema(frame):
+    """Column schema (name -> dtype) for an eager or lazy frame, without a
+    (warning-triggering) implicit materialization."""
+    return frame.collect_schema() if isinstance(frame, pl.LazyFrame) else frame.schema
+
+
 def _winsorize_polars(pl_df: pl.DataFrame, value: str, agg: str, policy) -> pl.DataFrame:
     """Global winsorization of ``value`` (Tiltak 2), computed natively in polars.
     Uses linear-interpolation quantiles to match pandas/``protect.winsorize``
@@ -44,11 +56,11 @@ def _winsorize_polars(pl_df: pl.DataFrame, value: str, agg: str, policy) -> pl.D
     w = policy.suppression.winsorize
     if w is None or agg not in _WINSOR_AGGS:
         return pl_df
-    dtype = pl_df.schema[value]
+    dtype = _schema(pl_df)[value]
     if not dtype.is_numeric() or dtype == pl.Boolean:
         return pl_df
-    lo = pl_df.select(pl.col(value).quantile(float(w[0]), interpolation="linear")).item()
-    hi = pl_df.select(pl.col(value).quantile(float(w[1]), interpolation="linear")).item()
+    lo = _eager(pl_df.select(pl.col(value).quantile(float(w[0]), interpolation="linear"))).item()
+    hi = _eager(pl_df.select(pl.col(value).quantile(float(w[1]), interpolation="linear"))).item()
     return pl_df.with_columns(pl.col(value).clip(lo, hi))
 
 
@@ -57,13 +69,13 @@ def _native_group_agg(pl_df: pl.DataFrame, by: list, value: str, agg: str, polic
     returning them as pandas Series (small — one row per group) sharing a group
     index, ready for the backend-neutral ``SafeVerbs._release_group_agg``. Only the
     aggregate crosses to pandas; the private per-row frame stays in polars."""
-    counts = (pl_df.group_by(by).agg(pl.len().alias("__n"))
+    counts = (_eager(pl_df.group_by(by).agg(pl.len().alias("__n")))
               .to_pandas().set_index(by)["__n"])
     if agg == "size":
         return counts.copy(), counts
     work = _winsorize_polars(pl_df, value, agg, policy)
     expr = getattr(pl.col(value), agg)()          # mean/sum/std/var/median/count
-    table = (work.group_by(by).agg(expr.alias("__v"))
+    table = (_eager(work.group_by(by).agg(expr.alias("__v")))
              .to_pandas().set_index(by)["__v"])
     return table, counts
 
@@ -316,6 +328,20 @@ class SafePolarsGroupBy:
                    "stats": columns, "backend": "polars"})
 
 
+# Terminal (Released-returning) verbs on the pandas SafeFrame that are safe to
+# delegate to from the polars facade — models, causal/survival, hypothesis tests,
+# correlation/description, and per-column frame reducers. Intermediate-returning
+# verbs (assign/where/groupby/merge/sort_values/…) are deliberately excluded, and
+# ``propensity`` (returns a private SafeColumn) is excluded too.
+_DELEGATED_VERBS = frozenset({
+    "ols", "logit", "poisson", "cox", "kaplan_meier", "logrank", "weibull_aft",
+    "lognormal_aft", "loglogistic_aft", "rmst", "feols", "iv", "ate", "refute_ate",
+    "synthetic_control", "corr", "cov", "describe", "ttest", "mannwhitney",
+    "anova", "chisq", "corr_test", "value_counts", "crosstab", "pivot_table",
+    "mean", "sum", "median", "std", "var", "count", "nunique",
+})
+
+
 class SafePolarsFrame:
     """The only polars data object user code can touch in STRICT mode."""
 
@@ -335,7 +361,7 @@ class SafePolarsFrame:
         """Normalize a select/with_columns argument: a column name -> a column
         reference; a SafeExpr passes through. Anything else is refused."""
         if isinstance(e, str):
-            if e not in self._pl.columns:
+            if e not in _schema(self._pl).names():
                 raise DisclosureError(f"unknown column: {e}")
             return SafeExpr(pl.col(e), col=e)
         if isinstance(e, SafeExpr):
@@ -371,10 +397,10 @@ class SafePolarsFrame:
         SafeColumn reducer (identical to the pandas dialect)."""
         from .safeframe import SafeColumn
         if e._col is not None and e._name is None:   # simple column: convert only it
-            series = self._pl.select(e._col).to_pandas().iloc[:, 0]
+            series = _eager(self._pl.select(e._col)).to_pandas().iloc[:, 0]
         else:                                        # derived / aliased: materialize it
             base = e._pre if e._col is None else pl.col(e._col)
-            series = self._pl.select(base.alias(e._name or "value")).to_pandas().iloc[:, 0]
+            series = _eager(self._pl.select(base.alias(e._name or "value"))).to_pandas().iloc[:, 0]
         return getattr(SafeColumn(series, self._verbs), e._agg)()
 
     def with_columns(self, *exprs, **named) -> "SafePolarsFrame":
@@ -387,14 +413,35 @@ class SafePolarsFrame:
 
     def group_by(self, *by) -> SafePolarsGroupBy:
         cols = [c for grp in by for c in ([grp] if isinstance(grp, str) else grp)]
+        names = _schema(self._pl).names()
         for c in cols:
-            if c not in self._pl.columns:
+            if c not in names:
                 raise DisclosureError(f"unknown column: {c}")
         return SafePolarsGroupBy(self._pl, cols, self._verbs)
 
+    def _safeframe(self):
+        """A pandas SafeFrame over the (converted) data — the delegation target for
+        verbs that are backend-neutral and already audited on the pandas facade.
+        A LazyFrame source is collected here."""
+        from .safeframe import SafeFrame
+        return SafeFrame(_eager(self._pl).to_pandas(), self._verbs)
+
+    def _catalog_raw(self):
+        """``(n_rows, [(name, dtype, n_missing)])`` for the schema catalog. Collects
+        a LazyFrame source (row/missing counts need the data)."""
+        frame = _eager(self._pl)
+        nulls = dict(zip(frame.columns, frame.null_count().row(0)))
+        return frame.height, [(str(c), str(dt), int(nulls[c])) for c, dt in frame.schema.items()]
+
     def __getattr__(self, name):
+        # Terminal, Released-returning verbs are delegated to the audited pandas
+        # SafeFrame. Only this explicit whitelist is reachable — never the
+        # intermediate-returning shaping verbs (assign/where/groupby/merge/…), so
+        # the polars facade stays the security boundary.
         if name.startswith("_"):
             raise AttributeError(name)
+        if name in _DELEGATED_VERBS:
+            return getattr(self._safeframe(), name)
         raise DisclosureError(
             f"{name!r} is not a supported method in safepy's polars dialect")
 
