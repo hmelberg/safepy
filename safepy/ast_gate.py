@@ -74,13 +74,16 @@ _DENIED_METHODS: frozenset = frozenset({
     # order-statistic-checked versions; on a raw frame/OPEN the mediator still
     # refuses the bare scalar/frame they produce.)
     "idxmax", "idxmin", "argmax", "argmin",
-    "nlargest", "nsmallest", "first", "last", "nth", "mode", "rank",
-    # --- accept arbitrary callables / mini-language code ---
-    "apply", "applymap", "map", "transform", "pipe", "agg", "aggregate",
-    "query", "eval", "rolling", "expanding", "ewm",
-    # --- raw reshape: places individual values in cells (use pivot_table, which
-    #     aggregates + suppresses; stack/unstack likewise reshape raw rows) ---
-    "pivot", "stack", "unstack", "melt", "explode", "wide_to_long",
+    "nlargest", "nsmallest", "first", "last", "nth", "mode",
+    # --- accept arbitrary CALLABLES (arbitrary code is the real risk, not the
+    #     verb): apply/applymap/pipe take a function and have no dict form; the
+    #     mini-language strings run code too. map/agg/transform are NOT here —
+    #     they have safe dict/string forms and are facade-guarded to reject
+    #     callables (see compute-private principle in DESIGN/further-work). ---
+    "apply", "applymap", "pipe", "query", "eval", "rolling", "expanding", "ewm",
+    # NB: reshapes (pivot/stack/unstack/melt/explode) and rank are NOT denied —
+    # they return a private Safe object that still exits only via a suppressed
+    # aggregate, so they are safe by construction (see the facade methods).
     # --- rendering surface that embeds raw arrays ---
     # 'plot'/'hist'/'boxplot' are intentionally NOT here: plotting is enforced by
     # type instead. It exists only on aggregate results (Released.plot) and, for

@@ -291,6 +291,20 @@ class SafeColumn:
         s = self._s.replace(to_replace) if value is None else self._s.replace(to_replace, value)
         return self._col(s)
 
+    def map(self, mapping):
+        """Recode via a {old: new} mapping (like replace, but unmatched → NaN).
+        Only a dict is accepted — a callable would be arbitrary code."""
+        if not isinstance(mapping, dict):
+            raise DisclosureError(
+                "map takes a {old: new} dict (a function would be arbitrary code); "
+                "use replace/where for other recoding")
+        return self._col(self._s.map(mapping))
+
+    def rank(self, *, method="average", ascending=True, pct=False):
+        """Per-row rank — a position, not a value. Stays a private column, so it
+        is released only through a suppressed aggregation."""
+        return self._col(self._s.rank(method=method, ascending=ascending, pct=pct))
+
     # -- per-row derived columns (order-dependent; sort_values first for panels).
     #    Each returns a private SafeColumn -> released only via a suppressed
     #    aggregation, so no new disclosure path. --
@@ -605,6 +619,30 @@ class SafeSeriesGroupBy:
     def describe(self, **kw):
         return self._verbs.group_describe(self._df, self._by, self._value)
 
+    def agg(self, func, **kw):
+        """``groupby(by)[value].agg('mean')`` or ``.agg(['mean', 'std'])``. Only
+        stat *names* are accepted (a callable would be arbitrary code); each cell
+        is suppressed on its group count like every other aggregation."""
+        if callable(func) or (isinstance(func, (list, tuple)) and any(callable(f) for f in func)):
+            raise DisclosureError(
+                "agg takes a stat name like 'mean' or ['mean', 'std'], not a function")
+        if isinstance(func, str):
+            return self._agg(func, **kw)
+        return self._verbs.group_agg_multi(self._df, self._by, self._value, list(func), **kw)
+
+    aggregate = agg
+
+    def transform(self, func):
+        """``groupby(by)[value].transform('mean')`` — the group statistic
+        broadcast back to each row. Returns a private SafeColumn (e.g. for
+        within-group demeaning); only stat names are accepted."""
+        if not isinstance(func, str) or func not in _SUMMARISE_FUNCS:
+            raise DisclosureError(
+                f"transform takes a stat name from {sorted(_SUMMARISE_FUNCS)} "
+                "(a function would be arbitrary code)")
+        out = self._df.groupby(self._by, observed=True)[self._value].transform(func)
+        return SafeColumn(out, self._verbs)
+
     def _agg(self, agg, **kw):
         return self._verbs.group_agg(self._df, self._by, self._value, agg, **kw)
 
@@ -782,6 +820,44 @@ class SafeFrame:
                     raise DisclosureError(f"unknown column: {c}")
             subset = cols
         return SafeFrame(self._df.drop_duplicates(subset=subset), self._verbs)
+
+    # -- reshapes: rearrange rows/columns. The result is a private Safe object
+    #    whose values were already private and still exit only through a
+    #    suppressed aggregation, so reshaping is safe by construction. --
+    def _reshaped(self, obj):
+        return SafeFrame(obj, self._verbs) if isinstance(obj, pd.DataFrame) \
+            else SafeColumn(obj, self._verbs)
+
+    def _need(self, *cols):
+        for c in cols:
+            if c is not None and c not in self._df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+
+    def melt(self, *, id_vars=None, value_vars=None, var_name=None, value_name="value"):
+        ids = [id_vars] if isinstance(id_vars, str) else list(id_vars or [])
+        vals = [value_vars] if isinstance(value_vars, str) else list(value_vars or [])
+        self._need(*ids, *vals)
+        return self._reshaped(self._df.melt(
+            id_vars=ids or None, value_vars=vals or None,
+            var_name=var_name, value_name=value_name))
+
+    def pivot(self, *, index, columns, values):
+        """Raw reshape (no aggregation). Safe because the result is a private
+        SafeFrame; a *released* pivot with individual values in cells is still
+        blocked at the exit (each reducer checks its own count). For a released
+        cross-tab use pivot_table, which suppresses cells."""
+        self._need(index, columns, values)
+        return self._reshaped(self._df.pivot(index=index, columns=columns, values=values))
+
+    def explode(self, column):
+        self._need(column)
+        return self._reshaped(self._df.explode(column))
+
+    def stack(self, **kw):
+        return self._reshaped(self._df.stack())
+
+    def unstack(self, level=-1, **kw):
+        return self._reshaped(self._df.unstack(level))
 
     def assign(self, *args, **kwargs) -> "SafeFrame":
         """Add derived columns. Two forms:

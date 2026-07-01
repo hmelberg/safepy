@@ -80,6 +80,34 @@ class SafeVerbs(StatsMixin):
             "value": value, "min_n": k, "groups": int(len(counts)),
             "cells_suppressed": int((counts < k).sum()), "backend": "pandas"})
 
+    def group_agg_multi(self, df: pd.DataFrame, by, value: str, stats,
+                        *, min_n=None, round=None) -> Released:
+        """``df.groupby(by)[value].agg(['mean', 'std'])`` — a multi-stat table.
+        Every stat for a group shares that group's row count, so the whole row is
+        suppressed when the group is below ``min_n``."""
+        if protect is None:
+            raise DisclosureError("the 'protect' package is required")
+        stats = list(stats)
+        bad = [s for s in stats if s not in _ALLOWED_AGGS]
+        if bad:
+            raise DisclosureError(
+                f"agg {bad} not allowed; choose from {sorted(_ALLOWED_AGGS)}")
+        df = _unwrap(df)
+        k = self._min_n(min_n)
+        grouped = df.groupby(by, observed=True)[value]
+        counts = grouped.size()
+        table = grouped.agg(["size" if s == "size" else s for s in stats])
+        if isinstance(table, pd.Series):        # single stat -> frame
+            table = table.to_frame(stats[0])
+        else:
+            table.columns = stats
+        counts_df = pd.DataFrame({c: counts for c in table.columns})
+        safe = protect.suppress(table, counts=counts_df, min_n=k, round=self._round(round))
+        return Released(frame_payload(safe), audit={
+            "kind": "table", "verb": "group_agg_multi", "by": by, "value": value,
+            "stats": stats, "min_n": k, "groups": int(len(counts)),
+            "rows_suppressed": int((counts < k).sum()), "backend": "pandas"})
+
     def value_counts(self, df: pd.DataFrame, col: str, *, min_n=None, round=None) -> Released:
         """Suppressed frequency table of one column."""
         if protect is None:

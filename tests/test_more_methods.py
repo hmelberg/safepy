@@ -133,18 +133,82 @@ def test_pivot_table_suppresses_small_cells():
     assert any(v is None for v in flat)
 
 
-# ---- refusals: raw reshape blocked by the gate -------------------------------
+# ---- reshapes: now allowed as private-object producers (compute-private) -----
 
-def test_pivot_refused_by_gate():
-    r = _strict("df.pivot(index='unit', columns='year', values='salary')")
+def test_melt_then_aggregate():
+    # melt is a private reshape; the melted 'value' column still exits only via a
+    # suppressed aggregation.
+    r = _strict("df.melt(id_vars=['sex'], value_vars=['salary'])"
+                ".groupby('sex')['value'].mean()")
+    assert r.ok and r.kind == "table"
+
+
+def test_pivot_private_then_reduce_suppressed():
+    # a raw pivot places individual salaries into (unit x sex) cells -- fine while
+    # private. Reducing a pivoted column has only n=3 (units) contributing rows,
+    # so the reducer's own n<min_n check suppresses the value. This is the whole
+    # compute-private argument in one test: the reshape is safe because the EXIT
+    # is guarded, not the operation.
+    r = _strict("df.drop_duplicates(subset=['unit', 'sex'])"
+                ".pivot(index='unit', columns='sex', values='salary')"
+                "['M'].mean()")
+    assert r.ok and r.kind == "scalar"
+    assert r.payload["value"] is None      # n=3 units < min_n=5 -> suppressed
+
+
+def test_explode_is_allowed():
+    # no list columns here, so explode is a structural no-op, but it must run
+    r = _strict("df.explode('salary').groupby('sex')['salary'].mean()")
+    assert r.ok
+
+
+# ---- guarded callable verbs: map / agg / transform / rank --------------------
+
+def test_column_map_dict():
+    r = _strict("df.assign(s=df['sex'].map({'M': 'Male', 'F': 'Female'})).value_counts('s')")
+    assert r.ok and set(r.payload["index"]) == {"Male", "Female"}
+
+
+def test_map_rejects_callable_name():
+    # 'str' is a whitelisted builtin, so it reaches the facade guard
+    r = _strict("df['sex'].map(str)")
+    assert r.ok is False and "dict" in r.error["message"]
+
+
+def test_map_lambda_blocked_by_gate():
+    r = _strict("df['salary'].map(lambda x: x)")   # lambda is not an allowed node
     assert r.ok is False
 
 
-def test_stack_refused_by_gate():
-    r = _strict("df.stack()")
+def test_groupby_agg_multi_stats():
+    r = _strict("df.groupby('sex')['salary'].agg(['mean', 'std'])")
+    assert r.ok and r.kind == "table"
+    assert set(r.payload["columns"]) == {"mean", "std"}
+
+
+def test_groupby_agg_single_string():
+    r = _strict("df.groupby('sex')['salary'].agg('mean')")
+    assert r.ok and r.kind == "table"
+
+
+def test_groupby_agg_rejects_callable():
+    r = _strict("df.groupby('sex')['salary'].agg(len)")   # len is a whitelisted builtin
+    assert r.ok is False and "not a function" in r.error["message"]
+
+
+def test_groupby_transform_broadcast():
+    # within-group demeaning: value minus its group mean, then aggregate
+    code = ("df.assign(dev=df['salary'] - df.groupby('sex')['salary'].transform('mean'))"
+            ".groupby('sex')['dev'].mean()")
+    r = _strict(code)
+    assert r.ok
+
+
+def test_transform_rejects_callable():
+    r = _strict("df.groupby('sex')['salary'].transform(abs)")
     assert r.ok is False
 
 
-def test_melt_refused_by_gate():
-    r = _strict("df.melt()")
-    assert r.ok is False
+def test_rank_is_private_column():
+    r = _strict("df.assign(rk=df['salary'].rank()).groupby('sex')['rk'].mean()")
+    assert r.ok and r.kind == "table"
