@@ -70,19 +70,42 @@ def run(code: str,
             assert gate.error is not None
             return SafeResult(ok=False, kind="error", error=gate.error.as_dict())
 
-        value, ns = execute(code, namespace, allow_imports=imports_ok)
+        expr_values, ns = execute(code, namespace, allow_imports=imports_ok)
         catalog = _build_catalog(ns, policy)
 
-        result = mediate(value, policy)
-        result.audit.setdefault("level", policy.level.value)
-        result.audit.setdefault("profile", active.value)
-        result.audit.setdefault("verbs_used", gate.calls)
-        if result.ok and result.kind == "chart" and render != "spec":
-            from .charts import render_chart
-            result.payload = render_chart(result.payload, render)
-            result.audit["render"] = render
-        result.catalog = catalog
-        return result
+        # Each top-level bare expression is a potential result. Releasable ones are
+        # collected; the last expression is the "primary" (top-level fields), which
+        # may be a refusal (backward compatible). Non-releasable intermediates
+        # (e.g. cph.fit()) are skipped.
+        def _stamp(res):
+            res.audit.setdefault("level", policy.level.value)
+            res.audit.setdefault("profile", active.value)
+            res.audit.setdefault("verbs_used", gate.calls)
+            if res.kind == "chart" and render != "spec":
+                from .charts import render_chart
+                res.payload = render_chart(res.payload, render)
+                res.audit["render"] = render
+            return res
+
+        results, primary = [], None
+        for i, value in enumerate(expr_values):
+            is_last = i == len(expr_values) - 1
+            try:
+                res = _stamp(mediate(value, policy))
+            except DisclosureError as exc:
+                if is_last:  # keep the last refusal as the primary (ok=False)
+                    primary = SafeResult(ok=False, kind="error",
+                                         error={"kind": type(exc).__name__, "message": str(exc)})
+                continue
+            results.append(res)
+            if is_last:
+                primary = res
+
+        if primary is None:  # no bare expressions (datasets-only) -> catalog only
+            primary = SafeResult(ok=True, kind="none")
+        primary.results = results
+        primary.catalog = catalog
+        return primary
 
     except ValidationError as exc:
         return SafeResult(ok=False, kind="error", error=exc.as_dict(), catalog=catalog)

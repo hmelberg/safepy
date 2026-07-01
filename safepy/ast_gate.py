@@ -146,10 +146,9 @@ class _Validator(ast.NodeVisitor):
             else:
                 self._fail(stmt, "structure",
                            f"top-level {type(stmt).__name__} is not allowed; "
-                           "use simple assignments and a final expression")
-        if not isinstance(node.body[-1], ast.Expr):
-            self._fail(node.body[-1], "structure",
-                       "the program must end in an expression that produces a result")
+                           "use simple assignments and expressions")
+        # A script may end on an assignment (build datasets -> catalog only) or on
+        # one/several bare expressions (each a released result). No end-in-expr rule.
         self.generic_visit(node)
 
     def _check_assign(self, stmt: ast.Assign):

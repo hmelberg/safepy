@@ -6,9 +6,17 @@
 (name, columns, dtypes, and suppressed n_rows/n_missing — never values), built by
 scanning the post-execution namespace (`safepy/api.py:_build_catalog`). The
 namespace is the authoritative record and the only place variable *names* live,
-so no per-frame tracking or auto-registration is needed. Notes below kept for
-rationale; "suggested phasing" is largely done except the multiple-results
-envelope (shared with loops).
+so no per-frame tracking or auto-registration is needed.
+
+The **multiple-results envelope** is also implemented: each top-level bare
+expression is a potential result; releasable ones are collected into
+`SafeResult.results` (in order), the last is the "primary" (top-level fields,
+backward compatible), non-releasable intermediates (e.g. `cph.fit()`) are
+skipped, and a datasets-only script (ending on an assignment) is `ok` with
+`kind="none"` and just a catalog. This is the shared output envelope the parked
+loops work also needs.
+
+Notes below kept for rationale.
 
 ## What we want
 

@@ -33,12 +33,20 @@ class SafeResult:
     """What the API returns. ``payload`` is render-ready and disclosure-checked;
     ``audit`` records what was done (suppressed cells, thresholds, verbs used)."""
     ok: bool
-    kind: str                       # "table" | "scalar" | "model" | "plot" | "error"
+    kind: str                       # "table" | "scalar" | "model" | "plot" | "none" | "error"
     payload: Any = None
     audit: dict = field(default_factory=dict)
     error: dict | None = None
     catalog: list | None = None     # schema of datasets left in the session (no data)
+    results: list | None = None     # all released results (the envelope); top-level = last
+
+    def _leaf(self) -> dict:
+        return {"ok": self.ok, "kind": self.kind, "payload": self.payload,
+                "audit": self.audit, "error": self.error}
 
     def as_dict(self) -> dict:
-        return {"ok": self.ok, "kind": self.kind, "payload": self.payload,
-                "audit": self.audit, "error": self.error, "catalog": self.catalog}
+        d = self._leaf()
+        d["catalog"] = self.catalog
+        # serialise each result as a leaf (no nested results/catalog -> no recursion)
+        d["results"] = None if self.results is None else [r._leaf() for r in self.results]
+        return d

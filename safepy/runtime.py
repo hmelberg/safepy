@@ -53,11 +53,12 @@ def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 
 def execute(code: str, namespace: dict, *, allow_imports: bool = False):
-    """Run gated ``code`` and return ``(final_value, ns)``.
+    """Run gated ``code`` and return ``(expr_values, ns)``.
 
-    ``ns`` is the post-execution namespace — the authoritative record of every
-    name bound during the script (used to build the dataset catalog). ``namespace``
-    should contain the library handles (``pd``, ``np``, ...) and the data sources;
+    ``expr_values`` is the value of every top-level *bare expression* in the
+    script, in order — each is a potential released result. Assignments/imports
+    are executed for their side effects. ``ns`` is the post-execution namespace —
+    the authoritative record of every bound name (used for the dataset catalog).
     ``__builtins__`` is overwritten here.
     """
     ns = dict(namespace)
@@ -67,12 +68,15 @@ def execute(code: str, namespace: dict, *, allow_imports: bool = False):
     ns["__builtins__"] = builtins
 
     tree = ast.parse(code, mode="exec")
-    *prefix, last = tree.body  # gate guarantees last is an ast.Expr
+    expr_values = []
 
     try:
-        if prefix:
-            exec(compile(ast.Module(body=prefix, type_ignores=[]), "<safepy>", "exec"), ns)
-        result = eval(compile(ast.Expression(body=last.value), "<safepy>", "eval"), ns)
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Expr):
+                expr_values.append(
+                    eval(compile(ast.Expression(body=stmt.value), "<safepy>", "eval"), ns))
+            else:
+                exec(compile(ast.Module(body=[stmt], type_ignores=[]), "<safepy>", "exec"), ns)
     except SafePythonError:
         # Our own errors (DisclosureError/ValidationError raised by safe verbs)
         # carry no data values and are meant to be shown to the user verbatim.
@@ -84,4 +88,4 @@ def execute(code: str, namespace: dict, *, allow_imports: bool = False):
         raise SandboxError(
             f"your code raised {type(exc).__name__} during execution"
         ) from None
-    return result, ns
+    return expr_values, ns
