@@ -72,6 +72,11 @@ def run(code: str,
     active = Profile(profile) if profile is not None else policy.profile
     catalog = None  # datasets left in the session (populated once execution runs)
 
+    if dialect == "r":
+        # R is parsed & translated (never executed) to the shared release core,
+        # so it bypasses the Python gate/runtime entirely. See r_api.
+        return _run_r(code, sources, policy, active)
+
     try:
         namespace = _build_namespace(active, policy, sources, dialect)
         allowed_names = frozenset(namespace)
@@ -128,6 +133,29 @@ def run(code: str,
     except SafePythonError as exc:  # pragma: no cover - catch-all, still no data leak
         return SafeResult(ok=False, kind="error", catalog=catalog,
                           error={"kind": "SafePythonError", "message": str(exc)})
+
+
+def _run_r(code: str, sources: dict, policy: Policy, active: Profile) -> SafeResult:
+    """Translate a restricted R pipeline to the shared release core and mediate."""
+    from .r_api import translate_r
+    verbs = SafeVerbs(policy)
+    try:
+        released = translate_r(code, verbs, sources)
+        res = mediate(released, policy)
+        res.audit.setdefault("level", policy.level.value)
+        res.audit.setdefault("profile", active.value)
+        res.audit.setdefault("dialect", "r")
+        res.results = [res]
+        return res
+    except ValidationError as exc:
+        return SafeResult(ok=False, kind="error", error=exc.as_dict())
+    except (DisclosureError, SandboxError) as exc:
+        return SafeResult(ok=False, kind="error",
+                          error={"kind": type(exc).__name__, "message": str(exc)})
+    except BaseException as exc:  # noqa: BLE001 - sanitise: never leak a data value
+        return SafeResult(ok=False, kind="error", error={
+            "kind": "SandboxError",
+            "message": f"your R code raised {type(exc).__name__} during translation"})
 
 
 def _build_catalog(ns: dict, policy: Policy) -> list:
