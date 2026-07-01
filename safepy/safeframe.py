@@ -574,6 +574,13 @@ class SafeFrame:
     def rmst(self, *, duration, event, t, by=None, **kw) -> Released:
         return self._verbs.rmst(self._df, duration=duration, event=event, t=t, by=by, **kw)
 
+    def feols(self, *, y, x, fe=None, cluster=None, **kw) -> Released:
+        return self._verbs.feols(self._df, y=y, x=x, fe=fe, cluster=cluster, **kw)
+
+    def iv(self, *, y, x=None, endog, instruments, fe=None, cluster=None, **kw) -> Released:
+        return self._verbs.iv(self._df, y=y, x=x, endog=endog, instruments=instruments,
+                              fe=fe, cluster=cluster, **kw)
+
     def __len__(self):
         raise DisclosureError("len() on a frame is not allowed; use a count aggregation")
 

@@ -230,6 +230,25 @@ encodes it to the transport the caller asked for.
 - OLS/GLM term support for interaction/transform terms defaults to full `n`
   (only main-effect categorical levels are individually suppressed).
 
+## Causal inference
+
+Much of it is coefficient-table output, which slots into the safe-regression
+pattern:
+
+- **Difference-in-differences / event study** — already expressible as
+  `smf.ols('y ~ treat*post')`; no new library.
+- **RDD (local linear)** — filter to a bandwidth + `y ~ D + run`.
+- **Panel fixed effects, two-way-FE DiD, IV (2SLS), clustered SEs** — via
+  `pyfixest` (`stats.py`): `df.feols(y=, x=[], fe=[], cluster=)` and
+  `df.iv(y=, x=[], endog=, instruments=[])`. The formula is built from validated
+  column names (never a user string → no formulaic eval); categorical covariates
+  are one-hot encoded with sub-`min_n` levels dropped; fixed effects are absorbed
+  (never reported); results are coefficient tables with per-term suppression.
+- **Deferred (per-unit-heavy):** propensity-score *matching* (matched pairs are
+  unit-to-unit links — release only the aggregate ATT; propensity scores as a
+  private `SafeColumn`) and *synthetic control* (donor weights can be
+  disclosive). Wrap a narrow DoWhy/CausalPy slice when needed.
+
 ## Non-goals (handled elsewhere)
 
 Data-side pre-processing and the `risk` k-anonymity gate live in `protect`.

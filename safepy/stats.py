@@ -180,6 +180,119 @@ class StatsMixin:
             audit={"kind": "regression", "verb": family, "min_n": k,
                    "terms_suppressed": suppressed, "backend": "lifelines"})
 
+    # ---- fixed-effects / IV regression (pyfixest) --------------------------
+
+    def _numeric_design(self, df, xs):
+        """One-hot non-numeric covariates (dropping sub-min_n levels) into a
+        numeric design with identifier-safe names. Returns (pieces, support)."""
+        k = self._policy.min_n
+        pieces, support = {}, {}
+        for c in xs:
+            if pd.api.types.is_numeric_dtype(df[c]):
+                pieces[c] = df[c]
+                support[c] = int(df[c].notna().sum())
+            else:
+                dummies = pd.get_dummies(df[c].astype(str), prefix=c, drop_first=True)
+                for col in dummies.columns:
+                    n = int(dummies[col].sum())
+                    if n >= k:
+                        name = re.sub(r"\W", "_", str(col))
+                        pieces[name] = dummies[col].astype(float)
+                        support[name] = n
+        return pieces, support
+
+    def feols(self, df, *, y, x, fe=None, cluster=None):
+        import pyfixest as pf
+
+        df = _unwrap(df)
+        xs = [x] if isinstance(x, str) else list(x)
+        fes = [] if fe is None else ([fe] if isinstance(fe, str) else list(fe))
+        clusters = [cluster] if cluster else []
+        _validate_idents(y, *xs, *fes, *clusters)
+        for c in [y, *xs, *fes, *clusters]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+
+        pieces, support = self._numeric_design(df, xs)
+        if not pieces:
+            raise DisclosureError("no covariates with sufficient support")
+        data = {y: df[y], **pieces}
+        for f in fes:
+            data[f] = df[f].astype("category")
+        if cluster:
+            data[cluster] = df[cluster]
+        model_df = pd.DataFrame(data)
+
+        formula = f"{y} ~ " + " + ".join(pieces.keys())
+        if fes:
+            formula += " | " + " + ".join(fes)
+        vcov = {"CRV1": cluster} if cluster else "hetero"
+        m = pf.feols(formula, data=model_df, vcov=vcov)
+        return self._release_fixest(m, support, family="feols", n=int(df.shape[0]),
+                                    fe=fes, cluster=cluster)
+
+    def iv(self, df, *, y, x=None, endog, instruments, fe=None, cluster=None):
+        import pyfixest as pf
+
+        df = _unwrap(df)
+        xs = [] if x is None else ([x] if isinstance(x, str) else list(x))
+        endogs = [endog] if isinstance(endog, str) else list(endog)
+        zs = [instruments] if isinstance(instruments, str) else list(instruments)
+        fes = [] if fe is None else ([fe] if isinstance(fe, str) else list(fe))
+        clusters = [cluster] if cluster else []
+        _validate_idents(y, *xs, *endogs, *zs, *fes, *clusters)
+        for c in [y, *xs, *endogs, *zs, *fes, *clusters]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        for c in [*endogs, *zs]:
+            if not pd.api.types.is_numeric_dtype(df[c]):
+                raise DisclosureError(f"endogenous/instrument column '{c}' must be numeric")
+
+        pieces, support = self._numeric_design(df, xs)
+        data = {y: df[y], **pieces}
+        for c in [*endogs, *zs]:
+            data[c] = df[c]
+        for f in fes:
+            data[f] = df[f].astype("category")
+        if cluster:
+            data[cluster] = df[cluster]
+        model_df = pd.DataFrame(data)
+
+        exog = " + ".join(pieces.keys()) if pieces else "1"
+        parts = [f"{y} ~ {exog}"]
+        if fes:
+            parts.append(" + ".join(fes))
+        parts.append(f"{' + '.join(endogs)} ~ {' + '.join(zs)}")
+        formula = " | ".join(parts)
+        vcov = {"CRV1": cluster} if cluster else "hetero"
+        m = pf.feols(formula, data=model_df, vcov=vcov)
+        n = int(df.shape[0])
+        for e in endogs:
+            support[e] = n  # endogenous regressors use the full sample
+        return self._release_fixest(m, support, family="iv", n=n,
+                                    fe=fes, cluster=cluster)
+
+    def _release_fixest(self, m, support, *, family, n, fe, cluster):
+        k = self._policy.min_n
+        rows, suppressed = [], []
+        for term, row in m.tidy().iterrows():
+            blank = support.get(str(term), n) < k
+            rows.append({
+                "term": str(term),
+                "coef": None if blank else _num(row["Estimate"]),
+                "se": None if blank else _num(row["Std. Error"]),
+                "ci_low": None if blank else _num(row["2.5%"]),
+                "ci_high": None if blank else _num(row["97.5%"]),
+                "pvalue": None if blank else _num(row["Pr(>|t|)"]),
+            })
+            if blank:
+                suppressed.append(str(term))
+        return Released(
+            {"type": "regression", "family": family, "n": n,
+             "fixed_effects": fe, "cluster": cluster, "terms": rows},
+            audit={"kind": "regression", "verb": family, "min_n": k,
+                   "terms_suppressed": suppressed, "backend": "pyfixest"})
+
     # ---- restricted mean survival time (lifelines) -------------------------
 
     def rmst(self, df, *, duration, event, t, by=None):
