@@ -562,6 +562,18 @@ class SafeFrame:
     def logrank(self, *, duration, event, by, **kw) -> Released:
         return self._verbs.logrank(self._df, duration=duration, event=event, by=by, **kw)
 
+    def weibull_aft(self, *, duration, event, x, **kw) -> Released:
+        return self._verbs.weibull_aft(self._df, duration=duration, event=event, x=x, **kw)
+
+    def lognormal_aft(self, *, duration, event, x, **kw) -> Released:
+        return self._verbs.lognormal_aft(self._df, duration=duration, event=event, x=x, **kw)
+
+    def loglogistic_aft(self, *, duration, event, x, **kw) -> Released:
+        return self._verbs.loglogistic_aft(self._df, duration=duration, event=event, x=x, **kw)
+
+    def rmst(self, *, duration, event, t, by=None, **kw) -> Released:
+        return self._verbs.rmst(self._df, duration=duration, event=event, t=t, by=by, **kw)
+
     def __len__(self):
         raise DisclosureError("len() on a frame is not allowed; use a count aggregation")
 

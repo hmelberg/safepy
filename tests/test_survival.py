@@ -63,3 +63,20 @@ def test_logrank_needs_two_groups_of_min_n():
     r = run("df.logrank(duration='dur', event='died', by='g')",
             {"df": tiny}, profile=Profile.STRICT)
     assert r.ok is False
+
+
+def test_weibull_aft():
+    r = _strict("df.weibull_aft(duration='dur', event='died', x=['age', 'sex'])")
+    assert r.ok and r.payload["family"] == "weibull_aft"
+    assert any("age" in t["term"] for t in r.payload["terms"])
+
+
+def test_lognormal_aft():
+    r = _strict("df.lognormal_aft(duration='dur', event='died', x=['age'])")
+    assert r.ok and r.payload["family"] == "lognormal_aft"
+
+
+def test_rmst_by_group():
+    r = _strict("df.rmst(duration='dur', event='died', t=20, by='sex')")
+    assert r.ok and r.payload["type"] == "rmst"
+    assert set(r.payload["values"]) == {"F", "M"}

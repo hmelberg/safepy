@@ -76,9 +76,34 @@ class SafeResults:
             m.params, m.conf_int(), m.pvalues, support,
             family=self._family, n=int(m.nobs))
 
+    # Per-observation outputs are private COLUMNS, not forbidden: they return a
+    # SafeColumn (like any private column, e.g. salary), so you can aggregate or
+    # histogram them but never see individual values. A bare .predict() is a
+    # dangling SafeColumn and is refused by the mediator.
+    def predict(self, **kw):
+        return self._as_column(self._fitted.predict(), "predicted")
+
+    @property
+    def fittedvalues(self):
+        return self._as_column(self._fitted.fittedvalues, "fitted")
+
+    @property
+    def resid(self):
+        r = getattr(self._fitted, "resid", None)
+        if r is None:
+            raise DisclosureError("residuals are not available for this model")
+        return self._as_column(r, "resid")
+
+    def _as_column(self, arr, name):
+        import numpy as np
+        import pandas as pd
+
+        from .safeframe import SafeColumn
+        s = pd.Series(np.asarray(arr), index=self._df.index, name=name)
+        return SafeColumn(s, self._verbs)
+
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
-        raise DisclosureError(
-            f"results.{name} is not available (it may reveal per-observation "
-            "values); call .summary()")
+        raise DisclosureError(f"results.{name} is not available; use .summary(), "
+                              ".predict(), .fittedvalues or .resid")

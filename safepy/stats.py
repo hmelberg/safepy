@@ -105,14 +105,25 @@ class StatsMixin:
 
         df = _unwrap(df)
         xs = [x] if isinstance(x, str) else list(x)
+        model_df, support = self._survival_design(df, duration, event, xs)
+        cph = CoxPHFitter().fit(model_df, duration_col=duration, event_col=event)
+        s = cph.summary
+        params = s["coef"]
+        ci = pd.DataFrame({0: s["coef lower 95%"], 1: s["coef upper 95%"]})
+        return self._release_coeffs(params, ci, s["p"], support,
+                                    family="cox", n=int(df.shape[0]),
+                                    extra={"hazard_ratio": {t: _num(np.exp(params[t]))
+                                                            for t in params.index}})
+
+    def _survival_design(self, df, duration, event, xs):
+        """Numeric design matrix for a survival model. One-hot non-numeric
+        covariates and drop any level with fewer than min_n members (a singleton
+        level is disclosive). Returns (model_df, per-covariate support)."""
         _validate_idents(duration, event, *xs)
         missing = [c for c in [duration, event, *xs] if c not in df.columns]
         if missing:
             raise DisclosureError(f"unknown column(s): {missing}")
         k = self._policy.min_n
-
-        # numeric design matrix; one-hot non-numeric covariates and drop any
-        # level with fewer than min_n members (a singleton level is disclosive).
         pieces, support = {}, {}
         for c in xs:
             if pd.api.types.is_numeric_dtype(df[c]):
@@ -127,16 +138,78 @@ class StatsMixin:
                         support[col] = n
         if not pieces:
             raise DisclosureError("no covariates with sufficient support to fit a model")
+        return pd.DataFrame({duration: df[duration], event: df[event], **pieces}), support
 
-        model_df = pd.DataFrame({duration: df[duration], event: df[event], **pieces})
-        cph = CoxPHFitter().fit(model_df, duration_col=duration, event_col=event)
-        s = cph.summary
-        params = s["coef"]
-        ci = pd.DataFrame({0: s["coef lower 95%"], 1: s["coef upper 95%"]})
-        return self._release_coeffs(params, ci, s["p"], support,
-                                    family="cox", n=int(df.shape[0]),
-                                    extra={"hazard_ratio": {t: _num(np.exp(params[t]))
-                                                            for t in params.index}})
+    # ---- parametric accelerated-failure-time models (lifelines) ------------
+
+    def weibull_aft(self, df, *, duration, event, x):
+        from lifelines import WeibullAFTFitter
+        return self._aft(df, WeibullAFTFitter, "weibull_aft", duration, event, x)
+
+    def lognormal_aft(self, df, *, duration, event, x):
+        from lifelines import LogNormalAFTFitter
+        return self._aft(df, LogNormalAFTFitter, "lognormal_aft", duration, event, x)
+
+    def loglogistic_aft(self, df, *, duration, event, x):
+        from lifelines import LogLogisticAFTFitter
+        return self._aft(df, LogLogisticAFTFitter, "loglogistic_aft", duration, event, x)
+
+    def _aft(self, df, fitter_cls, family, duration, event, x):
+        df = _unwrap(df)
+        xs = [x] if isinstance(x, str) else list(x)
+        model_df, support = self._survival_design(df, duration, event, xs)
+        fitted = fitter_cls().fit(model_df, duration_col=duration, event_col=event)
+        k = self._policy.min_n
+        n = int(df.shape[0])
+        rows, suppressed = [], []
+        for idx, row in fitted.summary.iterrows():
+            param, cov = idx if isinstance(idx, tuple) else ("", idx)
+            term = f"{param}:{cov}" if param else str(cov)
+            blank = support.get(cov, n) < k
+            rows.append({
+                "term": term,
+                "coef": None if blank else _num(row.get("coef")),
+                "ci_low": None if blank else _num(row.get("coef lower 95%")),
+                "ci_high": None if blank else _num(row.get("coef upper 95%")),
+                "pvalue": None if blank else _num(row.get("p")),
+            })
+            if blank:
+                suppressed.append(term)
+        return Released(
+            {"type": "regression", "family": family, "n": n, "terms": rows},
+            audit={"kind": "regression", "verb": family, "min_n": k,
+                   "terms_suppressed": suppressed, "backend": "lifelines"})
+
+    # ---- restricted mean survival time (lifelines) -------------------------
+
+    def rmst(self, df, *, duration, event, t, by=None):
+        from lifelines import KaplanMeierFitter
+        from lifelines.utils import restricted_mean_survival_time
+
+        df = _unwrap(df)
+        _validate_idents(duration, event, *([by] if by else []))
+        for c in [duration, event] + ([by] if by else []):
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        k = self._policy.min_n
+
+        def one(sub):
+            kmf = KaplanMeierFitter().fit(sub[duration], sub[event])
+            return _num(restricted_mean_survival_time(kmf, t=t))
+
+        if by is None:
+            if len(df) < k:
+                raise DisclosureError("too few observations to release an RMST")
+            values = {"all": one(df)}
+        else:
+            values = {str(g): one(sub) for g, sub in df.groupby(by, observed=True)
+                      if len(sub) >= k}
+            if not values:
+                raise DisclosureError("no group with >= min_n members")
+
+        return Released({"type": "rmst", "t": t, "by": by, "values": values},
+                        audit={"kind": "table", "verb": "rmst", "min_n": k,
+                               "t": t, "by": by, "backend": "lifelines"})
 
     # ---- Kaplan-Meier survival curve (lifelines) ---------------------------
 
