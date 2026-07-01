@@ -283,6 +283,20 @@ class SafeColumn:
     def round(self, n=0): return self._col(self._s.round(n))
     def clip(self, lower=None, upper=None): return self._col(self._s.clip(lower, upper))
     def abs(self): return self._col(self._s.abs())
+    def fillna(self, value): return self._col(self._s.fillna(_unwrap_val(value)))
+
+    def where(self, cond, other=np.nan):
+        """Keep values where ``cond`` is True, else ``other`` — the idiomatic
+        conditional recode. ``cond`` is a boolean SafeColumn."""
+        if not isinstance(cond, SafeColumn):
+            raise DisclosureError("where needs a boolean column as its condition")
+        return self._col(self._s.where(cond._s, _unwrap_val(other)))
+
+    def mask(self, cond, other=np.nan):
+        """Inverse of ``where``: replace where ``cond`` is True."""
+        if not isinstance(cond, SafeColumn):
+            raise DisclosureError("mask needs a boolean column as its condition")
+        return self._col(self._s.mask(cond._s, _unwrap_val(other)))
 
     def replace(self, to_replace, value=None):
         """Recode values: replace({'M': 'Male'}) or replace('M', 'Male'). A
@@ -317,10 +331,18 @@ class SafeColumn:
         return self._s
 
     def cumsum(self): return self._col(self._num_series("cumsum").cumsum())
+    def cumprod(self): return self._col(self._num_series("cumprod").cumprod())
     def cummax(self): return self._col(self._num_series("cummax").cummax())
     def cummin(self): return self._col(self._num_series("cummin").cummin())
     def pct_change(self, periods=1):
         return self._col(self._num_series("pct_change").pct_change(periods))
+    def ffill(self): return self._col(self._s.ffill())
+    def bfill(self): return self._col(self._s.bfill())
+
+    def interpolate(self, method="linear"):
+        if not isinstance(method, str):
+            raise DisclosureError("interpolate takes a method name, not a function")
+        return self._col(self._num_series("interpolate").interpolate(method=method))
 
     @property
     def dt(self): return _SafeDt(self._s, self._verbs)
@@ -338,6 +360,12 @@ class SafeColumn:
     def median(self): return self._reduce("median")
     def std(self): return self._reduce("std")
     def var(self): return self._reduce("var")
+    # shape / precision stats — dimensionless, so round_to (a magnitude coarsener)
+    # is not applied; min_n suppression still holds.
+    def sem(self): return self._reduce("sem", apply_round=False)
+    def skew(self): return self._reduce("skew", apply_round=False)
+    def kurt(self): return self._reduce("kurt", apply_round=False)
+    kurtosis = kurt
 
     def nunique(self) -> Released:
         """Count of distinct values — an aggregate, suppressed if the column has
@@ -352,7 +380,7 @@ class SafeColumn:
             audit={"kind": "scalar", "verb": "column.nunique", "min_n": k,
                    "suppressed": suppressed, "backend": "pandas"})
 
-    def _reduce(self, stat: str) -> Released:
+    def _reduce(self, stat: str, *, apply_round=True) -> Released:
         k = self._verbs._policy.min_n
         n = int(self._s.notna().sum())
         raw = self._s.count() if stat == "count" else getattr(self._s, stat)()
@@ -361,7 +389,7 @@ class SafeColumn:
         if not suppressed:
             value = _num(raw)
             rt = self._verbs._policy.round_to
-            if rt is not None and value is not None:
+            if apply_round and rt is not None and value is not None:
                 value = float(round(value / rt) * rt)
         return Released({"type": "scalar", "stat": stat, "value": value, "n": (None if suppressed else n)},
                         audit={"kind": "scalar", "verb": f"column.{stat}", "min_n": k,
@@ -858,6 +886,28 @@ class SafeFrame:
     def unstack(self, level=-1, **kw):
         return self._reshaped(self._df.unstack(level))
 
+    # -- frame-wide transforms: another private SafeFrame --
+    def astype(self, dtype) -> "SafeFrame":
+        return SafeFrame(self._df.astype(dtype), self._verbs)
+
+    def round(self, decimals=0) -> "SafeFrame":
+        return SafeFrame(self._df.round(decimals), self._verbs)
+
+    def clip(self, lower=None, upper=None) -> "SafeFrame":
+        out = self._df.copy()
+        num = out.select_dtypes("number").columns
+        out[num] = out[num].clip(lower=lower, upper=upper)
+        return SafeFrame(out, self._verbs)
+
+    def select_dtypes(self, include=None, exclude=None) -> "SafeFrame":
+        return SafeFrame(self._df.select_dtypes(include=include, exclude=exclude), self._verbs)
+
+    def filter(self, items=None, like=None, regex=None) -> "SafeFrame":
+        """Select columns by name (items / like / regex). Column selection is
+        non-disclosive, so the result is another SafeFrame."""
+        return SafeFrame(self._df.filter(items=items, like=like, regex=regex, axis=1),
+                         self._verbs)
+
     def assign(self, *args, **kwargs) -> "SafeFrame":
         """Add derived columns. Two forms:
 
@@ -915,6 +965,81 @@ class SafeFrame:
         c = num.corr().round(3)
         return Released(frame_payload(c), audit={
             "kind": "table", "verb": "corr", "min_n": k, "backend": "pandas"})
+
+    def cov(self, **kw) -> Released:
+        """Covariance matrix over numeric columns (a function of releasable
+        std/corr; released only if the frame has at least ``min_n`` rows)."""
+        num = self._df.select_dtypes("number")
+        if num.shape[1] < 2:
+            raise DisclosureError("cov needs at least two numeric columns")
+        k = self._verbs._policy.min_n
+        if len(self._df) < k:
+            raise DisclosureError("too few rows to release a covariance matrix")
+        return Released(frame_payload(num.cov().round(3)), audit={
+            "kind": "table", "verb": "cov", "min_n": k, "backend": "pandas"})
+
+    # -- column-wise reducers over the whole frame -> a suppressed Released series.
+    #    Each column is suppressed on its own non-null count (the release rule is
+    #    per-column, exactly like a single SafeColumn reducer). --
+    def mean(self, **kw): return self._frame_reduce("mean")
+    def sum(self, **kw): return self._frame_reduce("sum")
+    def median(self, **kw): return self._frame_reduce("median")
+    def std(self, **kw): return self._frame_reduce("std")
+    def var(self, **kw): return self._frame_reduce("var")
+    def count(self, **kw): return self._frame_reduce("count", numeric_only=False)
+    def nunique(self, **kw): return self._frame_reduce("nunique", numeric_only=False, rounded=False)
+
+    def _frame_reduce(self, stat, *, numeric_only=True, rounded=True) -> Released:
+        cols = (self._df.select_dtypes("number") if numeric_only else self._df)
+        if cols.shape[1] == 0:
+            raise DisclosureError(f"{stat} needs at least one numeric column")
+        k = self._verbs._policy.min_n
+        rt = self._verbs._policy.round_to
+        index, values, suppressed = [], [], 0
+        for c in cols.columns:
+            s = cols[c]
+            n = int(s.notna().sum())
+            index.append(str(c))
+            if n < k:
+                values.append(None); suppressed += 1
+                continue
+            v = s.count() if stat == "count" else (
+                int(s.nunique()) if stat == "nunique" else getattr(s, stat)())
+            v = _num(v)
+            if rounded and rt is not None and v is not None:
+                v = float(round(v / rt) * rt)
+            values.append(v)
+        return Released({"type": "series", "name": stat, "index": index, "values": values},
+                        audit={"kind": "table", "verb": f"frame.{stat}", "min_n": k,
+                               "cols_suppressed": suppressed, "backend": "pandas"})
+
+    def describe(self, *, winsorize=None) -> Released:
+        """Per-column summary table with the same order-statistic guards as the
+        column-level ``describe`` (min/max/quartiles released only when enough
+        observations lie at/beyond them)."""
+        num = self._df.select_dtypes("number")
+        if num.shape[1] == 0:
+            raise DisclosureError("describe needs at least one numeric column")
+        k = self._verbs._policy.min_n
+        data = {}
+        for c in num.columns:
+            s = num[c].dropna()
+            n = int(s.shape[0])
+            agg = (lambda f: float(f) if n >= k else None)
+            data[str(c)] = {
+                "count": n if n >= k else None,
+                "mean": agg(s.mean()), "std": agg(s.std()),
+                "min": _order_stat(s, "min", k, winsorize=winsorize)[0],
+                "25%": _order_stat(s, "q", k, q=0.25)[0],
+                "50%": _order_stat(s, "q", k, q=0.50)[0],
+                "75%": _order_stat(s, "q", k, q=0.75)[0],
+                "max": _order_stat(s, "max", k, winsorize=winsorize)[0],
+            }
+        tab = pd.DataFrame(data).reindex(
+            ["count", "mean", "std", "min", "25%", "50%", "75%", "max"])
+        return Released(frame_payload(tab), audit={
+            "kind": "table", "verb": "describe", "min_n": k,
+            "winsorized": winsorize, "backend": "pandas"})
 
     # -- regression / survival: delegate to the safe-verb library --
     def ols(self, *, y, x, **kw) -> Released:
