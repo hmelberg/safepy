@@ -75,15 +75,22 @@ _DENIED_METHODS: frozenset = frozenset({
     # refuses the bare scalar/frame they produce.)
     "idxmax", "idxmin", "argmax", "argmin",
     "nlargest", "nsmallest", "first", "last", "nth", "mode",
+    # rank stays denied: rank + filter + sum is an ergonomic order-statistic
+    # DIFFERENCING primitive (filter rank<=k vs rank<=k-1, both above min_n, sum
+    # differs by one value-ordered individual). min_n cannot stop this at the
+    # exit; it needs the multi-query audit layer that does not exist yet. Unlike
+    # reshapes, rank hands out a value-ordered subset knob, so it is not safe by
+    # construction. Re-enable only alongside query-budget tracking.
+    "rank",
     # --- accept arbitrary CALLABLES (arbitrary code is the real risk, not the
     #     verb): apply/applymap/pipe take a function and have no dict form; the
     #     mini-language strings run code too. map/agg/transform are NOT here —
     #     they have safe dict/string forms and are facade-guarded to reject
     #     callables (see compute-private principle in DESIGN/further-work). ---
     "apply", "applymap", "pipe", "query", "eval", "rolling", "expanding", "ewm",
-    # NB: reshapes (pivot/stack/unstack/melt/explode) and rank are NOT denied —
-    # they return a private Safe object that still exits only via a suppressed
-    # aggregate, so they are safe by construction (see the facade methods).
+    # NB: reshapes (pivot/stack/unstack/melt/explode) are NOT denied — they keep
+    # the whole population and return a private Safe object that exits only via a
+    # suppressed aggregate, so they are safe by construction (see facade methods).
     # --- rendering surface that embeds raw arrays ---
     # 'plot'/'hist'/'boxplot' are intentionally NOT here: plotting is enforced by
     # type instead. It exists only on aggregate results (Released.plot) and, for

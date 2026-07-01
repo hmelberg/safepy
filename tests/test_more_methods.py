@@ -209,6 +209,14 @@ def test_transform_rejects_callable():
     assert r.ok is False
 
 
-def test_rank_is_private_column():
+def test_rank_denied_by_gate():
+    # rank + filter + sum is an order-statistic differencing primitive, so rank
+    # stays gate-denied until a multi-query audit layer exists.
     r = _strict("df.assign(rk=df['salary'].rank()).groupby('sex')['rk'].mean()")
-    assert r.ok and r.kind == "table"
+    assert r.ok is False
+
+
+def test_rank_differencing_attack_blocked():
+    # the concrete attack the denial prevents: sum over rank<=k vs rank<=k-1
+    r = _strict("df.assign(rk=df['salary'].rank())[df['rk'] <= 6]['salary'].sum()")
+    assert r.ok is False

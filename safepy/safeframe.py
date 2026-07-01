@@ -300,10 +300,9 @@ class SafeColumn:
                 "use replace/where for other recoding")
         return self._col(self._s.map(mapping))
 
-    def rank(self, *, method="average", ascending=True, pct=False):
-        """Per-row rank — a position, not a value. Stays a private column, so it
-        is released only through a suppressed aggregation."""
-        return self._col(self._s.rank(method=method, ascending=ascending, pct=pct))
+    # NB: no rank() — it is an order-statistic differencing primitive (rank +
+    # filter + sum isolates one value-ordered individual across two above-min_n
+    # queries) and is gate-denied until the multi-query audit layer exists.
 
     # -- per-row derived columns (order-dependent; sort_values first for panels).
     #    Each returns a private SafeColumn -> released only via a suppressed
