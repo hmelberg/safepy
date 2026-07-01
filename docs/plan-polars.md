@@ -66,19 +66,25 @@ below). The first slice is implemented and tested:
   the frame is `.collect()`-ed only at the conversion boundary (native aggregate,
   scalar, delegated verb, catalog). Schema introspection uses `collect_schema()`.
 
-**Native frequency tables.** `value_counts` and `crosstab` now compute their
-counts **natively in polars** (`group_by(...).len()`, then a polars `pivot` for
-crosstab) and release through backend-neutral cores factored out of `safe.py`
-(`_release_value_counts` / `_release_crosstab`). Nulls dropped and axes sorted to
-match pandas; equivalence verified incl. the microdata count-noise tier. Removed
-from `_DELEGATED_VERBS`; audit records `backend="polars"`.
+**Native frequency + 2-D + frame-reduce tables.** Computed **natively in polars**,
+each released through a backend-neutral core factored out of `safe.py`/`safeframe.py`:
+- `value_counts` / `crosstab` — `group_by(...).len()` (+ polars `pivot` for
+  crosstab); cores `_release_value_counts` / `_release_crosstab`.
+- `pivot_table` — `group_by(index, columns).agg` + polars `pivot` of both the
+  value and contributing-count tables; core `_release_pivot_table`. Native for the
+  single-index / single-column shape; multi-index / multi-column / `columns=None`
+  fall back to the (equally safe) pandas backend.
+- whole-frame reducers `mean`/`sum`/`median`/`std`/`var`/`count`/`nunique` —
+  per-column native compute (moment stats winsorized in polars); core
+  `safeframe._release_frame_reduce`.
 
-**Not yet (still delegate to pandas — correct, but a whole-frame conversion):**
-`pivot_table` (2-D value aggregation + contributing counts + per-aggfunc noise
-branches — higher equivalence risk, wants a dedicated native pass); the
-whole-frame reducers `df.mean()`/`df.sum()`/… (per-column winsorize/descriptive-k/
-count-noise/sig-round). Also: native whole-column scalar reducers; null group-key
-parity; query-plan introspection off the LazyFrame plan.
+All verified byte-equal to pandas incl. the microdata count-noise tier, work on
+lazy sources, and record `backend="polars"`. Removed from `_DELEGATED_VERBS`.
+
+**Not yet:** native whole-column scalar reducers (`select(reducer)` still converts
+one column via `SafeColumn`); multi-index/-column `pivot_table` native (currently
+the pandas fallback); null group-key parity (polars keeps null-key groups; pandas
+`groupby(observed=True)` drops them); query-plan introspection off the LazyFrame plan.
 
 ## The two axes (keep them separate)
 

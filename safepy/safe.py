@@ -313,7 +313,6 @@ class SafeVerbs(StatsMixin):
             raise DisclosureError(
                 f"aggfunc '{aggfunc}' is not allowed; choose one of {sorted(_ALLOWED_AGGS)}")
         df = _unwrap(df)
-        k = self._min_n(min_n)
         idx = [index] if isinstance(index, str) else list(index)
         cols = None if columns is None else ([columns] if isinstance(columns, str) else list(columns))
         for c in idx + (cols or []) + [values]:
@@ -324,6 +323,24 @@ class SafeVerbs(StatsMixin):
         # contributing (non-null) count per cell — the basis for suppression
         counts = df.pivot_table(values=values, index=idx, columns=cols,
                                 aggfunc="count").reindex_like(tab)
+        return self._release_pivot_table(tab, counts, aggfunc=aggfunc, index=idx,
+                                         columns=cols, values=values, min_n=min_n,
+                                         round=round, backend="pandas")
+
+    def _release_pivot_table(self, tab, counts, *, aggfunc, index, columns, values,
+                             min_n=None, round=None, backend="pandas") -> Released:
+        """Backend-neutral release of a 2-D value table ``tab`` paired with its
+        per-cell contributing ``counts`` (both DataFrames, aligned): Tiltak-5 stop
+        rule, suppression on the counts, and the per-aggfunc count-noise handling
+        (pure counts noised directly; sum scaled by the noised count; mean nulled
+        where the noised count is 0). A polars backend computes ``(tab, counts)``
+        natively and reuses this verbatim."""
+        if protect is None:
+            raise DisclosureError("the 'protect' package is required")
+        if aggfunc not in _ALLOWED_AGGS:
+            raise DisclosureError(
+                f"aggfunc '{aggfunc}' is not allowed; choose one of {sorted(_ALLOWED_AGGS)}")
+        k = self._min_n(min_n)
         _stop_if_too_sparse(counts.to_numpy(), self._policy)
         noising = bool(self._policy.suppression.count_noise)
         pure_count = aggfunc in ("count", "size")
@@ -340,6 +357,6 @@ class SafeVerbs(StatsMixin):
                 safe = safe.where(nc > 0, np.nan)
         return Released(frame_payload(safe), audit={
             "kind": "table", "verb": "pivot_table", "aggfunc": aggfunc,
-            "index": idx, "columns": cols, "values": values, "min_n": k,
+            "index": index, "columns": columns, "values": values, "min_n": k,
             "count_noise": self._policy.suppression.count_noise,
-            "cells_suppressed": int((counts < k).sum().sum()), "backend": "pandas"})
+            "cells_suppressed": int((counts < k).sum().sum()), "backend": backend})

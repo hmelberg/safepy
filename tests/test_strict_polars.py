@@ -258,6 +258,31 @@ def test_value_counts_lazy_source():
     assert r.ok and set(_as_dict(r.payload)) == {"F", "M"}
 
 
+# ---- native pivot_table -----------------------------------------------------
+
+@pytest.mark.parametrize("aggfunc", ["mean", "count", "sum", "median"])
+def test_pivot_table_native_matches_pandas(aggfunc):
+    spec = f"values='salary', index='sex', columns='region', aggfunc='{aggfunc}'"
+    p = _pandas(f"df.pivot_table({spec})")
+    q = _polars(f"df.pivot_table({spec})")
+    assert q.ok and q.audit.get("backend") == "polars"
+    assert _celldict(q.payload) == _celldict(p.payload)
+
+
+def test_pivot_table_microdata_tier():
+    spec = "values='salary', index='sex', columns='region', aggfunc='mean'"
+    p = run(f"df.pivot_table({spec})", {"df": PDF}, profile=Profile.STRICT, suppression="microdata")
+    q = run(f"df.pivot_table({spec})", {"df": PL_DF}, profile=Profile.STRICT,
+            dialect="polars", suppression="microdata")
+    assert q.ok and _celldict(q.payload) == _celldict(p.payload)
+
+
+def test_pivot_table_no_columns_falls_back_to_pandas():
+    # columns=None is not the single-index/single-column native case -> delegate
+    r = _polars("df.pivot_table(values='salary', index='sex')")
+    assert r.ok and r.audit.get("backend") == "pandas"
+
+
 # ---- lazy frames ------------------------------------------------------------
 
 def test_lazyframe_source_group_agg_matches_eager():
@@ -314,10 +339,19 @@ def test_describe_matches_pandas():
     assert polars.ok and polars.payload == pandas.payload
 
 
-def test_frame_mean_reducer_delegates():
-    r = _polars("df.mean()")
-    assert r.ok and r.payload["type"] == "series"
-    assert "salary" in r.payload["index"]
+@pytest.mark.parametrize("stat", ["mean", "sum", "std", "var", "median", "count", "nunique"])
+def test_frame_reducer_native_and_matches_pandas(stat):
+    p = _pandas(f"df.{stat}()")
+    q = _polars(f"df.{stat}()")
+    assert q.ok and q.audit.get("backend") == "polars"
+    assert _as_dict(q.payload) == _as_dict(p.payload)
+
+
+def test_frame_reducer_matches_pandas_microdata_tier():
+    p = run("df.mean()", {"df": PDF}, profile=Profile.STRICT, suppression="microdata")
+    q = run("df.mean()", {"df": PL_DF}, profile=Profile.STRICT,
+            dialect="polars", suppression="microdata")
+    assert q.ok and _as_dict(q.payload) == _as_dict(p.payload)
 
 
 def test_plot_on_polars_aggregate():

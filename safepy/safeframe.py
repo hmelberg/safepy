@@ -223,6 +223,46 @@ def _descriptive_k(policy):
 _WINSOR_STATS = frozenset({"mean", "std", "var", "sum", "sem", "skew", "kurt"})
 
 
+def _release_frame_reduce(policy, stat, per_col, *, rounded=True, backend="pandas") -> Released:
+    """Backend-neutral release of per-column frame reducers. ``per_col`` is a list
+    of ``(column_name, raw_aggregate, non_null_count)`` — the moment stats already
+    winsorized by the backend. Applies the per-column suppression (n < k),
+    count-noise (Tiltak 3), sig-rounding (median, Tiltak 8) and magnitude rounding,
+    exactly like the pandas path, so a polars backend reuses this verbatim."""
+    # counts/distinct use min_n; descriptive stats get the higher floor.
+    k = policy.min_n if stat in ("count", "sum", "nunique") else _descriptive_k(policy)
+    sf = policy.suppression.percentile_sig_figs
+    rt = policy.round_to
+    step = policy.suppression.count_noise
+    index, values, suppressed = [], [], 0
+    for c, raw, n in per_col:
+        index.append(str(c))
+        if n < k:
+            values.append(None); suppressed += 1
+            continue
+        v = _num(raw)
+        if step and stat in ("count", "sum", "mean"):       # Tiltak 3
+            noised_count = max(0, n + _cell_noise(str(c), int(step)))
+            if stat == "count":
+                v = float(noised_count)
+            elif stat == "sum":
+                v = v * (noised_count / n) if n else 0.0
+            elif stat == "mean" and noised_count == 0:
+                v = None
+        if v is None:
+            pass
+        elif stat == "median" and sf:
+            v = _sig_round(v, sf)
+        elif stat == "count" and step:
+            pass                                            # noised count not rounded
+        elif rounded and rt is not None:
+            v = float(round(v / rt) * rt)
+        values.append(v)
+    return Released({"type": "series", "name": stat, "index": index, "values": values},
+                    audit={"kind": "table", "verb": f"frame.{stat}", "min_n": k,
+                           "cols_suppressed": suppressed, "backend": backend})
+
+
 def _winsor_p(policy):
     """The single tail probability for order-stat winsorization, or None. The
     policy stores (low, high) percentiles; the lower one is the symmetric p."""
@@ -1120,44 +1160,20 @@ class SafeFrame:
         if cols.shape[1] == 0:
             raise DisclosureError(f"{stat} needs at least one numeric column")
         policy = self._verbs._policy
-        # counts/distinct use min_n; descriptive stats get the higher floor.
-        k = policy.min_n if stat in ("count", "sum", "nunique") else _descriptive_k(policy)
-        sf = policy.suppression.percentile_sig_figs
-        rt = policy.round_to
-        step = policy.suppression.count_noise
-        index, values, suppressed = [], [], 0
+        # per-column (name, raw aggregate, non-null count); winsorize moment stats.
+        per_col = []
         for c in cols.columns:
             s = cols[c]
             n = int(s.notna().sum())
-            index.append(str(c))
-            if n < k:
-                values.append(None); suppressed += 1
-                continue
-            src = _winsorized_series(s, policy) if stat in _WINSOR_STATS else s
-            v = s.count() if stat == "count" else (
-                int(s.nunique()) if stat == "nunique" else getattr(src, stat)())
-            v = _num(v)
-            noised_count = None
-            if step and stat in ("count", "sum", "mean"):   # Tiltak 3
-                noised_count = max(0, n + _cell_noise(str(c), int(step)))
-                if stat == "count":
-                    v = float(noised_count)
-                elif stat == "sum":
-                    v = v * (noised_count / n) if n else 0.0
-                elif stat == "mean" and noised_count == 0:
-                    v = None
-            if v is None:
-                pass
-            elif stat == "median" and sf:
-                v = _sig_round(v, sf)
-            elif stat == "count" and step:
-                pass                                        # noised count not rounded
-            elif rounded and rt is not None:
-                v = float(round(v / rt) * rt)
-            values.append(v)
-        return Released({"type": "series", "name": stat, "index": index, "values": values},
-                        audit={"kind": "table", "verb": f"frame.{stat}", "min_n": k,
-                               "cols_suppressed": suppressed, "backend": "pandas"})
+            if stat == "count":
+                raw = int(s.count())
+            elif stat == "nunique":
+                raw = int(s.nunique())
+            else:
+                src = _winsorized_series(s, policy) if stat in _WINSOR_STATS else s
+                raw = getattr(src, stat)()
+            per_col.append((c, raw, n))
+        return _release_frame_reduce(policy, stat, per_col, rounded=rounded, backend="pandas")
 
     def describe(self, *, winsorize=None) -> Released:
         """Per-column summary table with the same order-statistic guards as the

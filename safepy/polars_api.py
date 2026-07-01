@@ -35,6 +35,9 @@ _SAFE_REDUCERS = frozenset({"mean", "sum", "count", "median", "std", "var"})
 # safe._WINSOR_AGGS so the native path winsorizes exactly where the pandas path does.
 _WINSOR_AGGS = frozenset({"mean", "std", "var", "sum"})
 
+# aggfuncs allowed for pivot_table — mirrors safe._ALLOWED_AGGS.
+_SAFE_AGGFUNCS = frozenset({"mean", "sum", "count", "size", "median", "std", "var"})
+
 
 def _eager(frame):
     """Materialize a LazyFrame; pass an eager frame through. Shaping stays lazy;
@@ -62,6 +65,51 @@ def _winsorize_polars(pl_df: pl.DataFrame, value: str, agg: str, policy) -> pl.D
     lo = _eager(pl_df.select(pl.col(value).quantile(float(w[0]), interpolation="linear"))).item()
     hi = _eager(pl_df.select(pl.col(value).quantile(float(w[1]), interpolation="linear"))).item()
     return pl_df.with_columns(pl.col(value).clip(lo, hi))
+
+
+def _native_pivot_table(pl_df, values: str, i0: str, c0: str, aggfunc: str):
+    """Compute a 2-D value table and its per-cell contributing counts natively in
+    polars (``group_by(i0, c0).agg`` then pivot), returning aligned pandas
+    DataFrames with sorted axes — matching pandas ``pivot_table`` byte-for-byte
+    (verified numerically). Single index column, single pivot column."""
+    frame = _eager(pl_df)
+    vexpr = pl.len() if aggfunc == "size" else getattr(pl.col(values), aggfunc)()
+    grp = frame.group_by(i0, c0).agg(vexpr.alias("__v"), pl.col(values).count().alias("__n"))
+    tab = grp.pivot(on=c0, index=i0, values="__v").to_pandas().set_index(i0)
+    counts = grp.pivot(on=c0, index=i0, values="__n").to_pandas().set_index(i0)
+    tab = tab.sort_index().sort_index(axis=1)
+    counts = counts.reindex_like(tab)
+    tab.index.name = counts.index.name = i0
+    tab.columns.name = counts.columns.name = c0
+    return tab, counts
+
+
+def _native_frame_reduce(pl_df, stat: str, policy):
+    """Per-column ``(name, raw aggregate, non-null count)`` computed natively in
+    polars, ready for the backend-neutral ``safeframe._release_frame_reduce``.
+    Numeric-only for moment/median stats (matches pandas ``select_dtypes('number')``,
+    which excludes boolean); all columns for count/nunique. Moment stats are
+    winsorized (Tiltak 2) exactly where the pandas path winsorizes."""
+    frame = _eager(pl_df)
+    schema = frame.schema
+    if stat in ("count", "nunique"):
+        cols = list(schema.names())
+    else:
+        cols = [c for c, dt in schema.items() if dt.is_numeric() and dt != pl.Boolean]
+    if not cols:
+        raise DisclosureError(f"{stat} needs at least one numeric column")
+    per_col = []
+    for c in cols:
+        n = int(frame.select(pl.col(c).count()).item())         # non-null count
+        if stat == "count":
+            raw = n
+        elif stat == "nunique":
+            raw = int(frame.select(pl.col(c).drop_nulls().n_unique()).item())
+        else:
+            work = _winsorize_polars(frame, c, stat, policy)
+            raw = work.select(getattr(pl.col(c), stat)()).item()
+        per_col.append((c, raw, n))
+    return per_col
 
 
 def _native_group_agg(pl_df: pl.DataFrame, by: list, value: str, agg: str, policy):
@@ -337,8 +385,7 @@ _DELEGATED_VERBS = frozenset({
     "ols", "logit", "poisson", "cox", "kaplan_meier", "logrank", "weibull_aft",
     "lognormal_aft", "loglogistic_aft", "rmst", "feols", "iv", "ate", "refute_ate",
     "synthetic_control", "corr", "cov", "describe", "ttest", "mannwhitney",
-    "anova", "chisq", "corr_test", "pivot_table",
-    "mean", "sum", "median", "std", "var", "count", "nunique",
+    "anova", "chisq", "corr_test",
 })
 
 
@@ -411,6 +458,23 @@ class SafePolarsFrame:
         out += [self._as_expr(e)._expr.alias(name) for name, e in named.items()]
         return SafePolarsFrame(self._pl.with_columns(*out), self._verbs)
 
+    # -- whole-frame per-column reducers: computed natively in polars, released
+    #    through the shared safeframe._release_frame_reduce (suppression/noise/round). --
+    def mean(self): return self._frame_reduce("mean")
+    def sum(self): return self._frame_reduce("sum")
+    def median(self): return self._frame_reduce("median")
+    def std(self): return self._frame_reduce("std")
+    def var(self): return self._frame_reduce("var")
+    def count(self): return self._frame_reduce("count")
+    def nunique(self): return self._frame_reduce("nunique")
+
+    def _frame_reduce(self, stat: str) -> Released:
+        from .safeframe import _release_frame_reduce
+        policy = self._verbs._policy
+        per_col = _native_frame_reduce(self._pl, stat, policy)
+        return _release_frame_reduce(policy, stat, per_col,
+                                     rounded=(stat != "nunique"), backend="polars")
+
     def value_counts(self, col: str) -> Released:
         """Suppressed frequency table of one column — counts computed natively in
         polars (``group_by(col).len()``), released through the shared suppressor.
@@ -437,6 +501,30 @@ class SafePolarsFrame:
         tab = tab.reindex(sorted(tab.index)).sort_index(axis=1).fillna(0).astype(int)
         tab.index.name, tab.columns.name = row, col
         return self._verbs._release_crosstab(tab, row=row, col=col, backend="polars")
+
+    def pivot_table(self, *, values, index, columns=None, aggfunc="mean",
+                    min_n=None, round=None) -> Released:
+        """``df.pivot_table(...)`` — a 2-D aggregation. Computed natively in polars
+        for the single-index / single-column case (the common shape); multi-index,
+        multi-column, or ``columns=None`` fall back to the pandas backend, which is
+        equally safe (same audited release)."""
+        names = _schema(self._pl).names()
+        idx = [index] if isinstance(index, str) else list(index)
+        cols = None if columns is None else ([columns] if isinstance(columns, str) else list(columns))
+        for c in idx + (cols or []) + [values]:
+            if c not in names:
+                raise DisclosureError(f"unknown column: {c}")
+        if cols is None or len(idx) != 1 or len(cols) != 1:      # complex shape -> pandas
+            return self._safeframe().pivot_table(
+                values=values, index=index, columns=columns, aggfunc=aggfunc,
+                min_n=min_n, round=round)
+        if aggfunc not in _SAFE_AGGFUNCS:
+            raise DisclosureError(
+                f"aggfunc '{aggfunc}' is not allowed; choose one of {sorted(_SAFE_AGGFUNCS)}")
+        tab, counts = _native_pivot_table(self._pl, values, idx[0], cols[0], aggfunc)
+        return self._verbs._release_pivot_table(
+            tab, counts, aggfunc=aggfunc, index=idx, columns=cols, values=values,
+            min_n=min_n, round=round, backend="polars")
 
     def group_by(self, *by) -> SafePolarsGroupBy:
         cols = [c for grp in by for c in ([grp] if isinstance(grp, str) else grp)]
