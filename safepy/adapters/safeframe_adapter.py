@@ -28,7 +28,11 @@ class SafeFrameAdapter:
     name = "safeframe"
 
     def claims(self, result: Any) -> bool:
-        return isinstance(result, _INTERMEDIATES)
+        # polars-dialect facade objects (SafePolarsFrame/SafeExpr/…) carry a
+        # duck-type marker so we refuse them without importing polars_api (keeps
+        # polars an optional dependency).
+        return (isinstance(result, _INTERMEDIATES)
+                or getattr(result, "_is_polars_intermediate", False))
 
     def make_safe(self, result: Any, policy: Policy) -> SafeResult:
         kind = type(result).__name__

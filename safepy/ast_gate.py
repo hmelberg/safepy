@@ -50,7 +50,7 @@ _ALLOWED_NODES: frozenset = frozenset({
 
 # Modules that may be imported (only when allow_imports; they resolve to safe
 # facades in the runtime, never the real modules).
-_IMPORT_WHITELIST: frozenset = frozenset({"lifelines", "numpy", "pandas", "pyfixest"})
+_IMPORT_WHITELIST: frozenset = frozenset({"lifelines", "numpy", "pandas", "pyfixest", "polars"})
 
 # --- bare-name calls allowed (everything else must be lib.method(...)) -------
 _SAFE_BUILTINS: frozenset = frozenset({
@@ -68,7 +68,14 @@ _DENIED_METHODS: frozenset = frozenset({
     "tolist", "to_clipboard", "to_pickle", "to_parquet", "to_feather",
     "to_excel", "to_string", "to_markdown", "to_latex", "to_html",
     "values", "array", "item", "info", "memory_usage", "glimpse", "row",
-    "rows", "get_column", "write_csv", "write_parquet",
+    "rows", "get_column", "get_columns", "write_csv", "write_parquet",
+    # polars raw-export surface (never used by the safe facades) ---
+    "to_pandas", "to_arrow", "to_series", "to_struct", "to_init_repr",
+    # polars value-ordered / row-identity expression methods (same class as
+    # pandas nlargest/idxmax/rank; absent from the pandas surface, so free to
+    # deny). '.over()' is NOT here — it is group-broadcast, like transform.
+    "gather", "top_k", "bottom_k", "arg_max", "arg_min", "arg_sort",
+    "search_sorted", "sort",
     # --- positional / row-identifying reducers: return individual rows ---
     # (max/min/quantile/describe are NOT here: SafeColumn provides safe,
     # order-statistic-checked versions; on a raw frame/OPEN the mediator still

@@ -5,6 +5,35 @@ Do NOT build a separate library.** The disclosure-control core is not
 pandas-specific; duplicating it would mean two copies of the suppression logic to
 audit and keep in sync — unacceptable for a security tool.
 
+## Status (2026-07-01): Milestone 1-b, first slice landed
+
+The build is sequenced **surface first, backend second** (see "Build order"
+below). The first slice is implemented and tested:
+
+- `run(code, sources, profile=STRICT, dialect="polars")` selects the polars
+  surface; sources are wrapped in `SafePolarsFrame`.
+- End-to-end: `df.filter(pl.col(...) <cmp> v).group_by(...).agg(pl.col(c).<reducer>())`
+  for the safe reducers (`mean/sum/count/median/std/var`), plus
+  `group_by(...).len()`. Real polars evaluates the shaping; the shaped frame is
+  `.to_pandas()`-ed at the terminal verb and routed through the **existing
+  `SafeVerbs`**, so suppression is byte-identical to the pandas dialect.
+- New code: `safepy/polars_api.py` (`SafePl`/`SafeExpr`/`SafePolarsFrame`/
+  `SafePolarsGroupBy`). Gate whitelists `import polars` and denylists the polars
+  raw-export / value-ordered names. Dangling polars intermediates are refused.
+- Tests: `tests/test_strict_polars.py` — pandas-equivalence + boundary refusals.
+
+**Landed since:**
+- `select` / `with_columns` / `SafeExpr.alias` — column selection and derived
+  columns (→ private frame), whole-frame `select(reducer)` → suppressed scalar.
+- `.str` / `.dt` accessors on `SafeExpr` (element-wise, whitelisted, → derived
+  private expressions) and `pl.when(...).then(...).otherwise(...)`.
+- Reducers over *derived* expressions (e.g. `pl.col('name').str.len_chars().mean()`)
+  route through a materialized value column into the shared suppression path, so
+  `_col` is no longer required to be a plain column.
+
+**Not yet:** compound multi-reducer `agg` / multi-aggregation `select`, polars
+branch in `_build_catalog`, Milestone 2 (native polars compute).
+
 ## The two axes (keep them separate)
 
 - **Backend** — what computes the private intermediate data. Today: pandas.
@@ -26,12 +55,32 @@ Polars-as-backend (speed/arrow) is a separate, optional win.
 - `SafePolarsFrame` / `SafePolarsColumn` / `SafeExpr` facade
 - the verb *compute* (group_by/agg/filter in polars)
 
+## Build order (surface first, backend second)
+
+- **Milestone 1-b — polars surface, pandas backend.** Real polars evaluates the
+  shaping; convert the shaped (still-private) frame to pandas at the *terminal*
+  verb and reuse the existing `SafeVerbs`. Zero changes to the security core;
+  suppression proven byte-identical by pandas-equivalence tests.
+- **Milestone 2 — native polars compute.** Swap the reduction into polars behind
+  the identical facade, after factoring the suppressor out of `safe.py` into a
+  backend-neutral core. Refactor against the green equivalence suite.
+
+**Correction to the original "small-aggregate conversion" idea below:** the
+release path in `safe.py` does *not* accept a precomputed aggregate — it needs
+the **raw column** (it recomputes paired group counts, winsorizes the column for
+Tiltak 2, and computes order statistics over the full column). So "convert only
+the small result" cannot reach Tiltak parity. M1-b converts the shaped *frame*
+(still private — same trust boundary pandas already sits on) and lets `SafeVerbs`
+do the counts/winsorize/suppress. "Private data never crosses" is a backend/perf
+aspiration for M2, not a security property; pandas already holds private data.
+
 ## Architecture
 
-1. **`protect` boundary via small-aggregate conversion.** Keep private per-row
-   data in polars; compute the aggregate natively; convert the *small* result to
-   pandas (`.to_pandas()`, arrow zero-copy) for `protect.suppress` + the Tiltak
-   measures; return a `Released` (already neutral). Private data never crosses.
+1. **`protect` boundary.** *(M2 aspiration; M1-b converts the shaped frame — see
+   the correction above.)* Keep private per-row data in polars; compute the
+   aggregate natively; convert the *small* result to pandas (`.to_pandas()`,
+   arrow zero-copy) for `protect.suppress` + the Tiltak measures; return a
+   `Released` (already neutral).
 2. **`SafePolarsFrame` mirrors polars idioms:** `df.filter(...)`,
    `df.select(...)`, `df.with_columns(...)`, `df.group_by('g').agg(...)`.
 3. **`SafeExpr` wraps `pl.col(...)` expressions** with a whitelist mirroring the

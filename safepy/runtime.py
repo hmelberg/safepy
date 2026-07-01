@@ -46,6 +46,9 @@ def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
     if root == "pandas":
         from .namespaces import SafePd
         return SafePd()
+    if root == "polars":
+        from .polars_api import SafePl
+        return SafePl()
     if root == "pyfixest":
         from .pyfixest_api import SafePyfixest
         return SafePyfixest()

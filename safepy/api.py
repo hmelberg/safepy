@@ -25,15 +25,24 @@ from .safe import SafeVerbs
 from .safeframe import SafeFrame
 
 
-def _build_namespace(profile: Profile, policy: Policy, sources: dict[str, Any]) -> dict:
+def _build_namespace(profile: Profile, policy: Policy, sources: dict[str, Any],
+                     dialect: str = "pandas") -> dict:
     """The single difference between the two security postures.
 
     OPEN   — real pandas/numpy + the raw frames are in scope.
-    STRICT — only the safe-verb library, SafeFrame-wrapped sources, and the
+    STRICT — only the safe-verb library, facade-wrapped sources, and the
              look-alike `pd`/`np` facades; no real pandas, no raw frame, so
              disclosive capabilities are simply not reachable.
+
+    ``dialect`` selects the STRICT surface: ``pandas`` wraps sources in
+    ``SafeFrame``; ``polars`` wraps them in ``SafePolarsFrame`` (polars surface,
+    pandas suppression backend — see polars_api).
     """
     verbs = SafeVerbs(policy)
+    if profile is Profile.STRICT and dialect == "polars":
+        from .polars_api import SafePolarsFrame
+        return {"safe": verbs,
+                **{name: SafePolarsFrame(df, verbs) for name, df in sources.items()}}
     if profile is Profile.STRICT:
         from .namespaces import SafeNp, SafePd
         from .formula_api import SafeStats
@@ -47,6 +56,7 @@ def run(code: str,
         level: ProtectionLevel | str = ProtectionLevel.PROTECTED,
         *, profile: Profile | str | None = None,
         suppression=None,
+        dialect: str = "pandas",
         render: str = "spec") -> SafeResult:
     """Validate, run, and disclosure-check ``code`` against ``sources``.
 
@@ -63,7 +73,7 @@ def run(code: str,
     catalog = None  # datasets left in the session (populated once execution runs)
 
     try:
-        namespace = _build_namespace(active, policy, sources)
+        namespace = _build_namespace(active, policy, sources, dialect)
         allowed_names = frozenset(namespace)
         # Whitelisted imports (resolving to safe facades) are allowed only in the
         # STRICT capability profile.
