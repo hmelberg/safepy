@@ -102,26 +102,85 @@ def _mutate(sf, argstr: str):
     return sf
 
 
+def _select(sf, argstr: str):
+    """``select(a, b)`` keeps columns; ``select(-a, -b)`` drops them."""
+    items = [a.strip() for a in _split_top(argstr, [","]) if a.strip()]
+    drop = [i[1:].strip() for i in items if i.startswith("-")]
+    keep = [i for i in items if not i.startswith("-")]
+    if drop and keep:
+        raise DisclosureError("select cannot mix kept and dropped (-) columns")
+    for c in drop + keep:
+        if not _IDENT.match(c):
+            raise ValidationError(f"expected a column name in select, got {c!r}", kind="syntax")
+        _need_col(sf._df, c)
+    return sf.drop(drop) if drop else sf[keep]
+
+
+def _rename(sf, argstr: str):
+    """``rename(new = old, ...)``."""
+    mapping = {}
+    for pair in _split_top(argstr, [","]):
+        m = re.match(r"^\s*([A-Za-z_.][\w.]*)\s*=\s*([A-Za-z_.][\w.]*)\s*$", pair)
+        if not m:
+            raise ValidationError(f"rename needs new = old, got {pair!r}", kind="syntax")
+        new, old = m.group(1), m.group(2)
+        _need_col(sf._df, old)
+        mapping[old] = new
+    return sf.rename(columns=mapping)
+
+
+def _arrange(sf, argstr: str):
+    """``arrange(a, desc(b))`` — reorder rows (non-disclosive; no head/pull to read
+    the order back out)."""
+    by, ascending = [], []
+    for term in _split_top(argstr, [","]):
+        term = term.strip()
+        m = re.match(r"^desc\s*\(\s*([A-Za-z_.][\w.]*)\s*\)$", term)
+        col, asc = (m.group(1), False) if m else (term, True)
+        if not _IDENT.match(col):
+            raise ValidationError(f"arrange takes column names, got {term!r}", kind="syntax")
+        _need_col(sf._df, col)
+        by.append(col); ascending.append(asc)
+    return sf.sort_values(by, ascending=ascending)
+
+
+def _distinct(sf, argstr: str):
+    """``distinct()`` / ``distinct(cols)`` — drop duplicate rows."""
+    subset = _cols(argstr) if argstr.strip() else None
+    for c in subset or []:
+        _need_col(sf._df, c)
+    return sf.drop_duplicates(subset=subset)
+
+
 def _summarise(sf, group, argstr: str) -> Released:
     if group is None:
         raise DisclosureError("summarise needs a preceding group_by(...)")
-    pairs = _split_top(argstr, [","])
-    if len(pairs) != 1:
-        raise DisclosureError(
-            "this dialect supports a single summary, e.g. summarise(m = mean(x))")
-    m = re.match(r"^(\w+)\s*=\s*(\w+)\s*\(\s*([\w.]*)\s*\)$", pairs[0].strip())
-    if not m:
-        raise ValidationError(
-            f"summary must be name = fn(col), got {pairs[0]!r}", kind="syntax")
-    _name, fn, col = m.group(1), m.group(2), m.group(3)
-    if fn not in _AGG_MAP:
-        raise DisclosureError(
-            f"aggregation '{fn}' is not allowed; choose one of {sorted(_AGG_MAP)}")
-    df = sf._df
-    agg = _AGG_MAP[fn]
-    value = _need_col(df, col) if col else (group[0] if fn == "n" else None)
     by = group[0] if len(group) == 1 else group
-    return sf._verbs.group_agg(df, by, value, agg)
+    specs = []
+    for pair in _split_top(argstr, [","]):
+        m = re.match(r"^(\w+)\s*=\s*(\w+)\s*\(\s*([\w.]*)\s*\)$", pair.strip())
+        if not m:
+            raise ValidationError(
+                f"summary must be name = fn(col), got {pair!r}", kind="syntax")
+        name, fn, col = m.group(1), m.group(2), m.group(3)
+        if fn not in _AGG_MAP:
+            raise DisclosureError(
+                f"aggregation '{fn}' is not allowed; choose one of {sorted(_AGG_MAP)}")
+        value = _need_col(sf._df, col) if col else (group[0] if fn == "n" else None)
+        specs.append((name, _AGG_MAP[fn], value))
+    if len(specs) == 1:
+        return sf._verbs.group_agg(sf._df, by, specs[0][2], specs[0][1])
+    # multi-stat -> a frame, one column per named summary (each cell suppressed on
+    # its group count, via the shared group_agg release).
+    rels = [sf._verbs.group_agg(sf._df, by, value, agg) for _n, agg, value in specs]
+    index = rels[0].payload["index"]
+    dicts = [dict(zip(r.payload["index"], r.payload["values"])) for r in rels]
+    columns = [n for n, _a, _v in specs]
+    data = [[d.get(g) for d in dicts] for g in index]
+    return Released(
+        {"type": "frame", "columns": columns, "index": index, "data": data},
+        audit={"kind": "table", "verb": "r.summarise", "by": by, "stats": columns,
+               "backend": "pandas"})
 
 
 def _count(sf, argstr: str) -> Released:
@@ -203,6 +262,14 @@ def translate_r(code: str, verbs, sources: dict) -> Released:
             sf = _filter(sf, argstr)
         elif verb == "mutate":
             sf = _mutate(sf, argstr)
+        elif verb == "select":
+            sf = _select(sf, argstr)
+        elif verb == "rename":
+            sf = _rename(sf, argstr)
+        elif verb == "arrange":
+            sf = _arrange(sf, argstr)
+        elif verb == "distinct":
+            sf = _distinct(sf, argstr)
         elif verb == "group_by":
             group = _cols(argstr)
             for c in group:
@@ -213,7 +280,7 @@ def translate_r(code: str, verbs, sources: dict) -> Released:
             return _count(sf, argstr)
         else:
             raise DisclosureError(
-                f"R verb '{verb}' is not supported "
-                "(group_by, summarise, count, filter, mutate)")
+                f"R verb '{verb}' is not supported (group_by, summarise, count, "
+                "filter, mutate, select, rename, arrange, distinct)")
     raise DisclosureError(
         "R pipeline did not end in a releasable summary (summarise/count)")

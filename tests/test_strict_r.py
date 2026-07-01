@@ -99,6 +99,44 @@ def test_mutate_ifelse_bucket():
     assert r.ok and set(_as_dict(r.payload)) == {"hi", "lo"}
 
 
+# ---- tidyverse verb breadth: select / rename / arrange / distinct / multi ----
+
+def test_select_then_summarise_matches_pandas():
+    p = _pandas("df[['sex', 'salary']].groupby('sex')['salary'].mean()")
+    r = _r("df |> select(sex, salary) |> group_by(sex) |> summarise(m = mean(salary))")
+    assert r.ok and _as_dict(r.payload) == _as_dict(p.payload)
+
+
+def test_select_negative_drops_column():
+    # dropping 'name' still lets us aggregate salary
+    r = _r("df |> select(-name) |> group_by(sex) |> summarise(m = mean(salary))")
+    assert r.ok and set(_as_dict(r.payload)) == {"F", "M"}
+
+
+def test_rename_then_summarise_matches_pandas():
+    p = _pandas("df.rename(columns={'salary': 'pay'}).groupby('sex')['pay'].mean()")
+    r = _r("df |> rename(pay = salary) |> group_by(sex) |> summarise(m = mean(pay))")
+    assert r.ok and _as_dict(r.payload) == _as_dict(p.payload)
+
+
+def test_arrange_desc_is_shaping_only():
+    p = _pandas("df.groupby('sex')['salary'].mean()")
+    r = _r("df |> arrange(desc(salary)) |> group_by(sex) |> summarise(m = mean(salary))")
+    assert r.ok and _as_dict(r.payload) == _as_dict(p.payload)
+
+
+def test_distinct_then_summarise():
+    r = _r("df |> distinct() |> group_by(sex) |> summarise(m = mean(salary))")
+    assert r.ok and set(_as_dict(r.payload)) == {"F", "M"}
+
+
+def test_multi_stat_summarise():
+    r = _r("df |> group_by(sex) |> summarise(m = mean(salary), s = sd(salary))")
+    assert r.ok and r.payload["type"] == "frame"
+    assert set(r.payload["columns"]) == {"m", "s"}
+    assert set(r.payload["index"]) == {"F", "M"}
+
+
 # ---- base-R modelling reaches the shared facade verbs (the "extras") ---------
 
 def test_lm_matches_pandas_ols():
@@ -139,6 +177,10 @@ def test_glm_non_family_refused():
     "df |> filter(sort(salary) > 0) |> count(sex)",
     "df |> mutate(x = nope(salary)) |> count(sex)",          # unknown function
     "df |> mutate(x = salary[1]) |> count(sex)",             # positional -> parse error
+    "df |> select(sex, salary)",                             # dangling frame, no summary
+    "df |> arrange(salary)",                                 # dangling frame, no summary
+    "df |> select(nope) |> count(nope)",                     # unknown column
+    "df |> rename(x = nope) |> count(sex)",                  # unknown column
 ])
 def test_disclosive_or_unknown_r_refused(code):
     assert _r(code).ok is False

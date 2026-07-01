@@ -128,8 +128,11 @@ high-effort / low-return and should be **out of scope** — document it as such.
    whitelisted funcs (`log`/`exp`/`sqrt`/`abs`/`round`/`ifelse`/`is.na`/`as.*`/
    `toupper`/`tolower`/`nchar`/`substr`). Refuses unknown/disclosive funcs
    (`max`/`quantile`/`sort`/`system`) and positional `x[1]`.
-3. **Tidyverse breadth**: `select`/`rename`/`arrange`/`distinct`, multi-stat
-   `summarise`, `across`, `mutate`; then `left_join`/`pivot_*`.
+3. **(done) Tidyverse breadth**: `select(a,b)` / `select(-a)`, `rename(new=old)`,
+   `arrange(a, desc(b))`, `distinct([cols])`, and **multi-stat `summarise`**
+   (→ a frame, one column per named summary) — all reuse `SafeFrame` facade
+   methods. Remaining here: `across`, `case_when` (needs `~` in the expr parser),
+   `transmute`, `left_join`/`pivot_*`.
 4. **base-R analysis idioms**: `aggregate`, `table`, `tapply`, `cor`, `summary`,
    `df[cond, ]`, `mean(df$x)`; multi-statement scripts with `<-`.
 5. **data.table** core `dt[i, j, by]`.
