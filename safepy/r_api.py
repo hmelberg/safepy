@@ -139,11 +139,62 @@ def _count(verbs, df, argstr: str) -> Released:
     return verbs.value_counts(df, cols[0])
 
 
+_MODEL_CALL = re.compile(r"^(lm|glm)\s*\((.*)\)\s*$", re.S)
+
+
+def _resolve_df(name, sources):
+    if name not in sources:
+        raise ValidationError(f"unknown data source: {name!r}", kind="name")
+    df = sources[name]
+    return df.to_pandas() if hasattr(df, "to_pandas") else df
+
+
+def _model(verbs, code: str, sources: dict) -> Released:
+    """``lm(y ~ x1 + x2, data=df)`` / ``glm(y ~ x, family=binomial, data=df)`` ->
+    the shared regression verbs (ols/logit/poisson), reusing the same
+    per-coefficient suppression as the pandas/polars dialects."""
+    m = _MODEL_CALL.match(code)
+    kind, argstr = m.group(1), m.group(2).strip()
+    formula = data = family = None
+    for a in _split_top(argstr, [","]):
+        a = a.strip()
+        key = a.split("=", 1)[0].strip() if "=" in a else ""
+        if key in ("data", "family", "weights", "subset", "na.action"):
+            val = a.split("=", 1)[1].strip()
+            if key == "data":
+                data = val
+            elif key == "family":
+                family = val
+        elif "~" in a:
+            formula = a
+    if formula is None or data is None:
+        raise ValidationError(f"{kind}() needs a formula and data=", kind="syntax")
+    df = _resolve_df(data, sources)
+    lhs, rhs = formula.split("~", 1)
+    y = lhs.strip()
+    xs = [t.strip() for t in _split_top(rhs, ["+"])
+          if t.strip() and t.strip() not in ("1", "0", ".")]
+    if not _IDENT.match(y) or not all(_IDENT.match(x) for x in xs):
+        raise ValidationError("formula terms must be column names", kind="syntax")
+    if not xs:
+        raise DisclosureError("model needs at least one predictor")
+    if kind == "lm":
+        return verbs.ols(df, y=y, x=xs)
+    fam = (family or "").lower()
+    if "binomial" in fam:
+        return verbs.logit(df, y=y, x=xs)
+    if "poisson" in fam:
+        return verbs.poisson(df, y=y, x=xs)
+    raise DisclosureError("glm supports family = binomial (logit) or poisson")
+
+
 def translate_r(code: str, verbs, sources: dict) -> Released:
     """Parse a restricted R pipeline and return a suppressed ``Released``."""
     code = code.strip()
     if not code:
         raise ValidationError("empty program", kind="empty")
+    if _MODEL_CALL.match(code) and code.split("(", 1)[0].strip() in ("lm", "glm"):
+        return _model(verbs, code, sources)
     stages = _split_top(code, ["|>", "%>%"])
     src = stages[0].strip()
     if "<-" in src:                      # `result <- df |> ...`: take the data name

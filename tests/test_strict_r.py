@@ -68,6 +68,23 @@ def test_grouped_small_group_suppressed():
     assert r.ok and _as_dict(r.payload)["Z"] is None
 
 
+# ---- base-R modelling reaches the shared facade verbs (the "extras") ---------
+
+def test_lm_matches_pandas_ols():
+    p = _pandas("df.ols(y='salary', x=['pid'])")
+    r = _r("lm(salary ~ pid, data = df)")
+    assert r.ok and r.payload == p.payload
+
+
+def test_lm_intercept_only_term_ignored():
+    r = _r("lm(salary ~ pid + 1, data = df)")
+    assert r.ok and r.kind == "regression"
+
+
+def test_glm_non_family_refused():
+    assert _r("glm(salary ~ pid, family = gamma, data = df)").ok is False
+
+
 # ---- red team: disclosive / unknown / code-execution R must be refused -------
 
 @pytest.mark.parametrize("code", [
