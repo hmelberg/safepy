@@ -337,7 +337,7 @@ _DELEGATED_VERBS = frozenset({
     "ols", "logit", "poisson", "cox", "kaplan_meier", "logrank", "weibull_aft",
     "lognormal_aft", "loglogistic_aft", "rmst", "feols", "iv", "ate", "refute_ate",
     "synthetic_control", "corr", "cov", "describe", "ttest", "mannwhitney",
-    "anova", "chisq", "corr_test", "value_counts", "crosstab", "pivot_table",
+    "anova", "chisq", "corr_test", "pivot_table",
     "mean", "sum", "median", "std", "var", "count", "nunique",
 })
 
@@ -410,6 +410,33 @@ class SafePolarsFrame:
         out = [self._as_expr(e)._expr for e in exprs]
         out += [self._as_expr(e)._expr.alias(name) for name, e in named.items()]
         return SafePolarsFrame(self._pl.with_columns(*out), self._verbs)
+
+    def value_counts(self, col: str) -> Released:
+        """Suppressed frequency table of one column — counts computed natively in
+        polars (``group_by(col).len()``), released through the shared suppressor.
+        Nulls are dropped to match pandas ``value_counts``."""
+        if not isinstance(col, str) or col not in _schema(self._pl).names():
+            raise DisclosureError(f"unknown column: {col}")
+        counts = (_eager(self._pl.drop_nulls(col).group_by(col).agg(pl.len().alias("__n")))
+                  .to_pandas().set_index(col)["__n"].sort_values(ascending=False))
+        counts.index.name = col
+        return self._verbs._release_value_counts(counts, col=col, backend="polars")
+
+    def crosstab(self, row: str, col: str) -> Released:
+        """Suppressed 2-D frequency table — counts computed natively in polars
+        (``group_by(row, col).len()`` then pivot), released through the shared
+        suppressor. Axes are sorted and empty cells filled with 0 to match
+        pandas ``crosstab``."""
+        names = _schema(self._pl).names()
+        for c in (row, col):
+            if not isinstance(c, str) or c not in names:
+                raise DisclosureError(f"unknown column: {c}")
+        long = _eager(self._pl.drop_nulls([row, col]).group_by(row, col)
+                      .agg(pl.len().alias("__n")))
+        tab = long.pivot(on=col, index=row, values="__n").to_pandas().set_index(row)
+        tab = tab.reindex(sorted(tab.index)).sort_index(axis=1).fillna(0).astype(int)
+        tab.index.name, tab.columns.name = row, col
+        return self._verbs._release_crosstab(tab, row=row, col=col, backend="polars")
 
     def group_by(self, *by) -> SafePolarsGroupBy:
         cols = [c for grp in by for c in ([grp] if isinstance(grp, str) else grp)]

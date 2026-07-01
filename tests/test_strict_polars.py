@@ -221,6 +221,43 @@ def test_compound_agg_mixed_columns_with_alias():
     assert "avg" in r.payload["columns"]
 
 
+# ---- native frequency tables (value_counts / crosstab) ----------------------
+
+def _celldict(payload):
+    cols = payload["columns"]
+    return {(str(i), str(c)): payload["data"][r][k]
+            for r, i in enumerate(payload["index"]) for k, c in enumerate(cols)}
+
+
+def test_value_counts_native_and_matches_pandas():
+    p = _pandas("df.value_counts('region')")
+    q = _polars("df.value_counts('region')")
+    assert q.ok and q.audit.get("backend") == "polars"
+    assert _as_dict(q.payload) == _as_dict(p.payload)
+    assert _as_dict(q.payload)["Z"] is None            # Z (n=2) suppressed
+
+
+def test_crosstab_native_and_matches_pandas():
+    p = _pandas("df.crosstab('sex', 'region')")
+    q = _polars("df.crosstab('sex', 'region')")
+    assert q.ok and q.audit.get("backend") == "polars"
+    assert _celldict(q.payload) == _celldict(p.payload)
+
+
+def test_value_counts_matches_pandas_microdata_tier():
+    # native counts + count-noise + rounding must match pandas byte-for-byte
+    p = run("df.value_counts('sex')", {"df": PDF}, profile=Profile.STRICT, suppression="microdata")
+    q = run("df.value_counts('sex')", {"df": PL_DF}, profile=Profile.STRICT,
+            dialect="polars", suppression="microdata")
+    assert q.ok and _as_dict(q.payload) == _as_dict(p.payload)
+
+
+def test_value_counts_lazy_source():
+    r = run("df.value_counts('sex')", {"df": PL_DF.lazy()},
+            profile=Profile.STRICT, dialect="polars")
+    assert r.ok and set(_as_dict(r.payload)) == {"F", "M"}
+
+
 # ---- lazy frames ------------------------------------------------------------
 
 def test_lazyframe_source_group_agg_matches_eager():

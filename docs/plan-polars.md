@@ -66,11 +66,19 @@ below). The first slice is implemented and tested:
   the frame is `.collect()`-ed only at the conversion boundary (native aggregate,
   scalar, delegated verb, catalog). Schema introspection uses `collect_schema()`.
 
-**Not yet:** native compute for `value_counts`/`crosstab`/`pivot_table` (they
-delegate to pandas today); native whole-column scalar reducers (one-column pandas
-conversion via `SafeColumn`); null group-key parity (polars keeps null-key groups;
-pandas `groupby(observed=True)` drops them); query-plan introspection off the
-LazyFrame plan (the audit-friendly win the lazy seam now enables).
+**Native frequency tables.** `value_counts` and `crosstab` now compute their
+counts **natively in polars** (`group_by(...).len()`, then a polars `pivot` for
+crosstab) and release through backend-neutral cores factored out of `safe.py`
+(`_release_value_counts` / `_release_crosstab`). Nulls dropped and axes sorted to
+match pandas; equivalence verified incl. the microdata count-noise tier. Removed
+from `_DELEGATED_VERBS`; audit records `backend="polars"`.
+
+**Not yet (still delegate to pandas — correct, but a whole-frame conversion):**
+`pivot_table` (2-D value aggregation + contributing counts + per-aggfunc noise
+branches — higher equivalence risk, wants a dedicated native pass); the
+whole-frame reducers `df.mean()`/`df.sum()`/… (per-column winsorize/descriptive-k/
+count-noise/sig-round). Also: native whole-column scalar reducers; null group-key
+parity; query-plan introspection off the LazyFrame plan.
 
 ## The two axes (keep them separate)
 

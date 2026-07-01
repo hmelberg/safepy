@@ -252,11 +252,19 @@ class SafeVerbs(StatsMixin):
 
     def value_counts(self, df: pd.DataFrame, col: str, *, min_n=None, round=None) -> Released:
         """Suppressed frequency table of one column."""
+        df = _unwrap(df)
+        counts = df[col].value_counts()
+        return self._release_value_counts(counts, col=col, min_n=min_n, round=round,
+                                          backend="pandas")
+
+    def _release_value_counts(self, counts, *, col, min_n=None, round=None,
+                              backend="pandas") -> Released:
+        """Backend-neutral release of a per-value count Series (Tiltak 5 stop rule
+        + suppression + count-noise). A polars backend passes counts it computed
+        natively; the audited suppression is identical."""
         if protect is None:
             raise DisclosureError("the 'protect' package is required")
-        df = _unwrap(df)
         k = self._min_n(min_n)
-        counts = df[col].value_counts()
         _stop_if_too_sparse(counts.to_numpy(), self._policy)
         noising = bool(self._policy.suppression.count_noise)
         safe = protect.suppress(counts, counts=counts, min_n=k,
@@ -266,16 +274,22 @@ class SafeVerbs(StatsMixin):
         return Released(series_payload(safe, name=f"count({col})"), audit={
             "kind": "table", "verb": "value_counts", "col": col, "min_n": k,
             "count_noise": self._policy.suppression.count_noise,
-            "cells_suppressed": int((counts < k).sum()), "backend": "pandas"})
+            "cells_suppressed": int((counts < k).sum()), "backend": backend})
 
     def crosstab(self, df: pd.DataFrame, row: str, col: str,
                  *, min_n=None, round=None) -> Released:
         """Suppressed frequency cross-tabulation of two columns."""
+        df = _unwrap(df)
+        tab = pd.crosstab(df[row], df[col])
+        return self._release_crosstab(tab, row=row, col=col, min_n=min_n, round=round,
+                                      backend="pandas")
+
+    def _release_crosstab(self, tab, *, row, col, min_n=None, round=None,
+                          backend="pandas") -> Released:
+        """Backend-neutral release of a 2-D count table (row x col DataFrame)."""
         if protect is None:
             raise DisclosureError("the 'protect' package is required")
-        df = _unwrap(df)
         k = self._min_n(min_n)
-        tab = pd.crosstab(df[row], df[col])
         _stop_if_too_sparse(tab.to_numpy(), self._policy)
         noising = bool(self._policy.suppression.count_noise)
         safe = protect.suppress(tab, counts=tab, min_n=k,
@@ -285,7 +299,7 @@ class SafeVerbs(StatsMixin):
         return Released(frame_payload(safe), audit={
             "kind": "table", "verb": "crosstab", "row": row, "col": col,
             "min_n": k, "count_noise": self._policy.suppression.count_noise,
-            "backend": "pandas"})
+            "backend": backend})
 
     def pivot_table(self, df: pd.DataFrame, *, values: str, index, columns=None,
                     aggfunc: str = "mean", min_n=None, round=None) -> Released:
