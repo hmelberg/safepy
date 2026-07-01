@@ -113,6 +113,14 @@ def test_select_columns_then_agg_matches_pandas():
     assert _as_dict(polars.payload) == _as_dict(pandas.payload)
 
 
+def test_multi_select_aggregation():
+    r = _polars("import polars as pl\n"
+                "df.select(pl.col('salary').mean().alias('avg'), pl.col('salary').std().alias('sd'))")
+    assert r.ok and r.kind == "table"
+    d = dict(zip(r.payload["index"], r.payload["values"]))
+    assert set(d) == {"avg", "sd"} and d["avg"] is not None
+
+
 def test_select_dangling_frame_refused():
     # a plain column selection is an intermediate, not releasable
     r = _polars("df.select('sex', 'salary')")
@@ -154,6 +162,46 @@ def test_when_then_otherwise_bucket():
                 "df.with_columns(pl.when(pl.col('salary') >= 50000).then(pl.lit('hi'))"
                 ".otherwise(pl.lit('lo')).alias('band')).group_by('band').len()")
     assert r.ok and set(_as_dict(r.payload)) == {"hi", "lo"}
+
+
+# ---- compound (multi-reducer) agg -------------------------------------------
+
+def test_compound_agg_multiple_stats():
+    r = _polars("import polars as pl\n"
+                "df.group_by('sex').agg(pl.col('salary').mean(), pl.col('salary').std())")
+    assert r.ok and r.payload["type"] == "frame"
+    assert set(r.payload["columns"]) == {"mean(salary)", "std(salary)"}
+    assert set(r.payload["index"]) == {"F", "M"}
+
+
+def test_compound_agg_suppresses_small_group():
+    r = _polars("import polars as pl\n"
+                "df.group_by('region').agg(pl.col('salary').mean(), pl.col('salary').count())")
+    assert r.ok and r.payload["type"] == "frame"
+    zi = r.payload["index"].index("Z")
+    assert all(cell is None for cell in r.payload["data"][zi])   # whole Z row suppressed
+
+
+def test_compound_agg_mixed_columns_with_alias():
+    r = _polars("import polars as pl\n"
+                "df.group_by('sex').agg(pl.col('salary').mean().alias('avg'),"
+                " pl.col('pid').count())")
+    assert r.ok and r.payload["type"] == "frame"
+    assert "avg" in r.payload["columns"]
+
+
+# ---- schema catalog ---------------------------------------------------------
+
+def test_catalog_includes_polars_source():
+    r = _polars("import polars as pl\ndf.group_by('sex').agg(pl.col('salary').mean())")
+    cat = {c["name"]: c for c in (r.catalog or [])}
+    assert "df" in cat
+    df_cat = cat["df"]
+    assert df_cat["n_rows"] is not None            # 50 rows, above min_n
+    assert df_cat["n_columns"] == 5
+    cols = {c["name"]: c for c in df_cat["columns"]}
+    assert {"pid", "name", "sex", "region", "salary"} == set(cols)
+    assert cols["salary"]["n_missing"] == 0        # no missing -> reported as 0
 
 
 # ---- the facade is the boundary: intermediates and disclosive verbs refused --

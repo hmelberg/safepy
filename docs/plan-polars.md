@@ -30,9 +30,15 @@ below). The first slice is implemented and tested:
 - Reducers over *derived* expressions (e.g. `pl.col('name').str.len_chars().mean()`)
   route through a materialized value column into the shared suppression path, so
   `_col` is no longer required to be a plain column.
+- Compound grouped `agg` (multiple reducers → a suppressed frame, aligned on the
+  shared group index; alias honored as the column name) and multi-aggregation
+  whole-frame `select` (→ a series of suppressed scalars).
+- Polars branch in `_build_catalog` — polars sources appear in the schema catalog
+  (schema/null_count/height introspection, suppressed counts).
 
-**Not yet:** compound multi-reducer `agg` / multi-aggregation `select`, polars
-branch in `_build_catalog`, Milestone 2 (native polars compute).
+**Not yet:** Milestone 2 (native polars compute — factor the suppressor out of
+`safe.py` into a backend-neutral core, then compute the reduction in polars behind
+the identical facade).
 
 ## The two axes (keep them separate)
 

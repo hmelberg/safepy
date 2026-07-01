@@ -23,6 +23,7 @@ from __future__ import annotations
 import polars as pl
 
 from .errors import DisclosureError
+from .result import Released
 from .safe import SafeVerbs
 
 # Reducers that are safe *given* a minimum contributing count — mirrors the
@@ -233,27 +234,50 @@ class SafePolarsGroupBy:
         return self._verbs.group_agg(self._pl.to_pandas(), by, self._by[0], "size")
 
     def agg(self, *exprs):
-        if len(exprs) != 1:
-            raise DisclosureError(
-                "agg takes exactly one reducer for now, e.g. "
-                "pl.col('salary').mean() (compound aggregations arrive in a later milestone)")
-        e = exprs[0]
+        if not exprs:
+            raise DisclosureError("agg needs at least one reducer, e.g. pl.col('salary').mean()")
+        rels = [self._one_agg(e) for e in exprs]
+        if len(rels) == 1:
+            return rels[0]
+        return self._combine(rels)
+
+    def _one_agg(self, e) -> Released:
+        """One reducer -> a suppressed series Released, routed through SafeVerbs."""
         if not isinstance(e, SafeExpr) or e._agg is None:
             raise DisclosureError(
-                "agg needs a single reducer over a column, e.g. pl.col('salary').mean()")
+                "agg needs reducers over columns, e.g. pl.col('salary').mean()")
         by = self._by[0] if len(self._by) == 1 else self._by
-        if e._col is not None:                       # simple column: fast path
+        if e._col is not None and e._name is None:   # simple column: fast path
             return self._verbs.group_agg(self._pl.to_pandas(), by, e._col, e._agg)
-        # derived expression: materialize it as a value column, then aggregate
+        # derived expression, or an aliased column: materialize a value column so
+        # the released name follows the alias.
         name = e._name or "value"
-        pdf = self._pl.with_columns(e._pre.alias(name)).to_pandas()
-        return self._verbs.group_agg(pdf, by, name, e._agg)
+        base = e._pre if e._col is None else pl.col(e._col)
+        pdf = self._pl.with_columns(base.alias(name)).to_pandas()
+        rel = self._verbs.group_agg(pdf, by, name, e._agg)
+        if e._name:                                  # honor the alias as the output name
+            rel.payload["name"] = e._name
+        return rel
+
+    def _combine(self, rels) -> Released:
+        """Assemble several suppressed per-group series into one frame, aligned on
+        the (shared) group index. Each column keeps its own cell suppression, so a
+        group below min_n is blanked across every column."""
+        index = rels[0].payload["index"]
+        columns = [r.payload["name"] for r in rels]
+        dicts = [dict(zip(r.payload["index"], r.payload["values"])) for r in rels]
+        data = [[d.get(g) for d in dicts] for g in index]
+        return Released(
+            {"type": "frame", "columns": columns, "index": index, "data": data},
+            audit={"kind": "table", "verb": "group_agg_compound", "by": self._by,
+                   "stats": columns, "backend": "pandas"})
 
 
 class SafePolarsFrame:
     """The only polars data object user code can touch in STRICT mode."""
 
     _is_polars_intermediate = True
+    _is_polars_safeframe = True     # distinguishes a source frame for the catalog
 
     def __init__(self, pl_df: pl.DataFrame, verbs: SafeVerbs):
         self._pl = pl_df
@@ -288,17 +312,27 @@ class SafePolarsFrame:
         if terminals:
             if len(terminals) != len(norm):
                 raise DisclosureError("select cannot mix aggregations with plain columns")
-            if len(terminals) != 1:
-                raise DisclosureError(
-                    "select supports a single aggregation for now; use group_by().agg() for more")
-            e = terminals[0]
-            from .safeframe import SafeColumn
-            if e._col is not None:                   # simple column: fast path
-                series = self._pl.to_pandas()[e._col]
-            else:                                    # derived expression: materialize it
-                series = self._pl.select(e._pre.alias(e._name or "value")).to_pandas().iloc[:, 0]
-            return getattr(SafeColumn(series, self._verbs), e._agg)()
+            if len(terminals) == 1:                  # whole-frame reducer -> scalar
+                return self._scalar_agg(terminals[0])
+            # multiple whole-frame reducers -> a series of named suppressed scalars
+            names = [e._name or f"{e._agg}({e._col or 'value'})" for e in terminals]
+            values = [self._scalar_agg(e).payload.get("value") for e in terminals]
+            return Released(
+                {"type": "series", "name": "aggregate", "index": names, "values": values},
+                audit={"kind": "table", "verb": "select_aggregate", "stats": names,
+                       "backend": "pandas"})
         return SafePolarsFrame(self._pl.select(*[e._expr for e in norm]), self._verbs)
+
+    def _scalar_agg(self, e) -> Released:
+        """One whole-frame reducer -> a suppressed scalar Released, via the shared
+        SafeColumn reducer (identical to the pandas dialect)."""
+        from .safeframe import SafeColumn
+        if e._col is not None and e._name is None:   # simple column: fast path
+            series = self._pl.to_pandas()[e._col]
+        else:                                        # derived / aliased: materialize it
+            base = e._pre if e._col is None else pl.col(e._col)
+            series = self._pl.select(base.alias(e._name or "value")).to_pandas().iloc[:, 0]
+        return getattr(SafeColumn(series, self._verbs), e._agg)()
 
     def with_columns(self, *exprs, **named) -> "SafePolarsFrame":
         """Add derived columns (polars analog of pandas ``assign``). Returns a

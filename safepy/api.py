@@ -147,11 +147,22 @@ def _build_catalog(ns: dict, policy: Policy) -> list:
 
     catalog = []
     for name, val in ns.items():
-        if name.startswith("_") or not isinstance(val, SafeFrame):
+        if name.startswith("_"):
             continue
-        d = val._df
-        columns = [{"name": str(c), "dtype": str(d[c].dtype),
-                    "n_missing": count(d[c].isna().sum())} for c in d.columns]
-        catalog.append({"name": name, "n_rows": count(len(d)),
-                        "n_columns": len(d.columns), "columns": columns})
+        if isinstance(val, SafeFrame):
+            d = val._df
+            cols = [(str(c), str(d[c].dtype), int(d[c].isna().sum())) for c in d.columns]
+            n_rows = len(d)
+        elif getattr(val, "_is_polars_safeframe", False):
+            # polars source: introspect the real polars frame (no polars import
+            # needed here — val._pl already is one). null_count() -> a 1-row frame.
+            p = val._pl
+            nulls = dict(zip(p.columns, p.null_count().row(0)))
+            cols = [(str(c), str(dt), int(nulls[c])) for c, dt in p.schema.items()]
+            n_rows = p.height
+        else:
+            continue
+        columns = [{"name": c, "dtype": dt, "n_missing": count(nm)} for c, dt, nm in cols]
+        catalog.append({"name": name, "n_rows": count(n_rows),
+                        "n_columns": len(columns), "columns": columns})
     return catalog
