@@ -192,8 +192,13 @@ safestat spec, so it collapses onto m2py's `resolve_policy` when integrated.
    **(done, phase 5)** plotting (`charts.py`): `.plot.bar()/.line()/...` on
    aggregate results only, `df['x'].hist()` redirected to a suppressed binned
    frequency; `render=spec|plotly|png|html|ascii` chosen at the API. Raw plotting
-   (`df.plot()`, `.plot.scatter/.box`, `.plot` on a raw column) is refused.
-   Next: winsorized/frequency-checked extremes + safe boxplot (phase 6).
+   (`df.plot()`, `.plot.scatter`, `.plot` on a raw column) is refused.
+   **(done, phase 6)** order statistics: `min`/`max`/`quantile`/`describe`/
+   `boxplot` on a numeric `SafeColumn`, under one rule — a value is releasable
+   iff `min(#<=v, #>=v) >= min_n` (≥ min_n observations at/beyond it). Median &
+   quartiles pass; extremes pass only if shared (rounded/coded/boolean data) or
+   `winsorize=p`. Categorical extremes refused; boxplot omits outliers.
+   Next: coverage of grouped extremes / more idioms as needed.
 
 ### Plotting model (phase 5)
 

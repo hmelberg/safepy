@@ -74,9 +74,7 @@ def test_derived_column_arithmetic():
     "df['salary'].iloc[0]",         # gate: denied
     "df['salary'][0]",              # gate: positional indexing
     "df['salary'].head()",          # gate: denied
-    "df['salary'].max()",           # gate: extreme reducer denied
-    "df['salary'].min()",           # gate: extreme reducer denied
-    "df['salary'].quantile(0.9)",   # gate: denied
+    "df['salary'].tolist()",        # gate: denied
     "len(df['salary'])",            # SafeColumn.__len__ refuses
     "[x for x in df['salary']]",    # gate: comprehension not allowed
 ])

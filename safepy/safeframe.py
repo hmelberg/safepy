@@ -91,6 +91,23 @@ def _unwrap_val(x):
     return x._s if isinstance(x, SafeColumn) else x
 
 
+def _order_stat(s, kind, k, *, q=None, winsorize=None):
+    """Return ``(value_or_None, support)`` for an order statistic under the rule:
+    releasable iff ``min(#<=v, #>=v) >= min_n`` (at least min_n observations at or
+    beyond the value). Winsorizing pulls an extreme to a shared quantile bound."""
+    if winsorize is not None and kind in ("min", "max"):
+        p = float(winsorize)
+        v = float(s.quantile(1 - p if kind == "max" else p))
+    elif kind == "max":
+        v = float(s.max())
+    elif kind == "min":
+        v = float(s.min())
+    else:
+        v = float(s.quantile(q))
+    support = min(int((s <= v).sum()), int((s >= v).sum()))
+    return (v if support >= k else None), support
+
+
 def _nice_edges(s, bins):
     """Equal-width bin edges snapped to round numbers, so exact min/max are not
     revealed by the boundaries."""
@@ -119,12 +136,15 @@ class _ColumnPlot:
     def hist(self, bins=10, **kw):
         return self._c._hist(bins, kw.get("percent", False))
 
+    def box(self, **kw):
+        return self._c._box(kw.get("winsorize"))
+
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
         raise DisclosureError(
             f"plot.{name} on a raw column would reveal individual values; "
-            "aggregate first (e.g. value_counts().plot.bar()) or use .hist()")
+            "aggregate first (e.g. value_counts().plot.bar()), or use .hist()/.box()")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -210,6 +230,75 @@ class SafeColumn:
         return Released({"type": "scalar", "stat": stat, "value": value, "n": (None if suppressed else n)},
                         audit={"kind": "scalar", "verb": f"column.{stat}", "min_n": k,
                                "suppressed": suppressed, "backend": "pandas"})
+
+    # -- order statistics: released only if >= min_n observations lie at/beyond
+    #    the value (min(#<=v, #>=v) >= min_n). Median/quartiles pass; extremes
+    #    pass only if shared/winsorized. See _order_stat.
+    def _numeric(self):
+        if not pd.api.types.is_numeric_dtype(self._s):
+            raise DisclosureError(
+                "min/max/describe/box are for numeric columns; use value_counts() "
+                "for categories")
+        return self._s.dropna()
+
+    def max(self, *, winsorize=None): return self._extreme("max", winsorize)
+    def min(self, *, winsorize=None): return self._extreme("min", winsorize)
+
+    def _extreme(self, kind, winsorize):
+        s = self._numeric()
+        k = self._verbs._policy.min_n
+        value, support = _order_stat(s, kind, k, winsorize=winsorize)
+        return Released(
+            {"type": "scalar", "stat": kind, "value": value,
+             "n": support if value is not None else None},
+            audit={"kind": "scalar", "verb": kind, "min_n": k, "support": support,
+                   "winsorized": winsorize, "suppressed": value is None, "backend": "pandas"})
+
+    def quantile(self, q, *, winsorize=None):
+        s = self._numeric()
+        k = self._verbs._policy.min_n
+        value, support = _order_stat(s, "q", k, q=q, winsorize=winsorize)
+        return Released(
+            {"type": "scalar", "stat": f"q{q}", "value": value,
+             "n": support if value is not None else None},
+            audit={"kind": "scalar", "verb": "quantile", "q": q, "min_n": k,
+                   "support": support, "suppressed": value is None, "backend": "pandas"})
+
+    def describe(self, *, winsorize=None) -> Released:
+        s = self._numeric()
+        k = self._verbs._policy.min_n
+        n = int(s.shape[0])
+        agg = (lambda f: float(f) if n >= k else None)
+        stats = {
+            "count": n if n >= k else None,
+            "mean": agg(s.mean()), "std": agg(s.std()),
+            "min": _order_stat(s, "min", k, winsorize=winsorize)[0],
+            "25%": _order_stat(s, "q", k, q=0.25)[0],
+            "50%": _order_stat(s, "q", k, q=0.50)[0],
+            "75%": _order_stat(s, "q", k, q=0.75)[0],
+            "max": _order_stat(s, "max", k, winsorize=winsorize)[0],
+        }
+        return Released({"type": "describe", "name": str(self._s.name), "stats": stats},
+                        audit={"kind": "table", "verb": "describe", "min_n": k,
+                               "winsorized": winsorize, "backend": "pandas"})
+
+    def boxplot(self, *, winsorize=None):
+        return self._box(winsorize)
+
+    def _box(self, winsorize):
+        from .charts import chart_released
+        s = self._numeric()
+        k = self._verbs._policy.min_n
+        stats = {
+            "min": _order_stat(s, "min", k, winsorize=winsorize)[0],
+            "q1": _order_stat(s, "q", k, q=0.25)[0],
+            "median": _order_stat(s, "q", k, q=0.50)[0],
+            "q3": _order_stat(s, "q", k, q=0.75)[0],
+            "max": _order_stat(s, "max", k, winsorize=winsorize)[0],
+        }
+        return chart_released("box", {"type": "box", "name": str(self._s.name), "stats": stats},
+                              {"verb": "boxplot", "min_n": k, "winsorized": winsorize,
+                               "outliers": "omitted", "backend": "pandas"})
 
     # -- histogram: a raw-data plot, redirected to a suppressed binned frequency --
     def hist(self, bins=10, *, percent=False):

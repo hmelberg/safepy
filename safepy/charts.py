@@ -79,6 +79,15 @@ def _build_fig(spec: dict):
     import plotly.graph_objects as go
 
     d, ct = spec["data"], spec["chart_type"]
+    if ct == "box" or d.get("type") == "box":
+        st = d["stats"]
+        kw = {"name": str(d.get("name", "")), "q1": [st["q1"]],
+              "median": [st["median"]], "q3": [st["q3"]]}
+        if st.get("min") is not None:
+            kw["lowerfence"] = [st["min"]]
+        if st.get("max") is not None:
+            kw["upperfence"] = [st["max"]]
+        return go.Figure(go.Box(**kw))
     if d["type"] == "series":
         x, y = d["index"], _zeros(d["values"])
         if ct == "pie":
@@ -107,7 +116,14 @@ def _png(spec: dict) -> str:
 
     d, ct = spec["data"], spec["chart_type"]
     fig, ax = plt.subplots(figsize=(6, 4))
-    if d["type"] == "series":
+    if ct == "box" or d.get("type") == "box":
+        st = d["stats"]
+        bx = {"med": st["median"], "q1": st["q1"], "q3": st["q3"],
+              "whislo": st["min"] if st["min"] is not None else st["q1"],
+              "whishi": st["max"] if st["max"] is not None else st["q3"],
+              "fliers": [], "label": str(d.get("name", ""))}
+        ax.bxp([bx], showfliers=False)
+    elif d["type"] == "series":
         x, y = d["index"], _zeros(d["values"])
         if ct == "line" or ct == "area":
             ax.plot(x, y)
@@ -128,6 +144,12 @@ def _png(spec: dict) -> str:
 
 def _ascii(spec: dict) -> str:
     d = spec["data"]
+    if d.get("type") == "box":
+        st = d["stats"]
+        def c(v): return "(suppressed)" if v is None else v
+        return (f"{d.get('name','')}  box (outliers omitted)\n"
+                f"  min={c(st['min'])}  q1={c(st['q1'])}  median={c(st['median'])}  "
+                f"q3={c(st['q3'])}  max={c(st['max'])}")
     if d["type"] != "series":
         return "(table chart)"
     vals = [v for v in d["values"] if v is not None]

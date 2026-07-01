@@ -64,10 +64,12 @@ _DENIED_METHODS: frozenset = frozenset({
     "to_excel", "to_string", "to_markdown", "to_latex", "to_html",
     "values", "array", "item", "info", "memory_usage", "glimpse", "row",
     "rows", "get_column", "write_csv", "write_parquet",
-    # --- extremes / positional reducers: these RETURN individual values ---
-    "max", "min", "idxmax", "idxmin", "argmax", "argmin",
-    "nlargest", "nsmallest", "first", "last", "nth", "mode",
-    "quantile", "describe", "rank",
+    # --- positional / row-identifying reducers: return individual rows ---
+    # (max/min/quantile/describe are NOT here: SafeColumn provides safe,
+    # order-statistic-checked versions; on a raw frame/OPEN the mediator still
+    # refuses the bare scalar/frame they produce.)
+    "idxmax", "idxmin", "argmax", "argmin",
+    "nlargest", "nsmallest", "first", "last", "nth", "mode", "rank",
     # --- accept arbitrary callables / mini-language code ---
     "apply", "applymap", "map", "transform", "pipe", "agg", "aggregate",
     "query", "eval", "rolling", "expanding", "ewm",
