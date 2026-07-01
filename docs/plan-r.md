@@ -118,9 +118,16 @@ high-effort / low-return and should be **out of scope** — document it as such.
 ## Phased plan
 
 1. **(done)** First slice + `lm`/`glm` → facade; retarget to the STRICT facade.
-2. **Expression parser** (the enabling investment): tokenizer + recursive-descent
-   for R expressions → evaluate against `SafeColumn`. Unlocks `mutate`, `filter`
-   with compound predicates, `case_when`/`if_else`, `transmute`.
+2. **(done) Expression parser** (`r_expr.py`): a hand-rolled tokenizer +
+   precedence-climbing parser + evaluator against `SafeColumn` — **no dependency,
+   default-deny** (only whitelisted operators/functions recognised). Chosen over
+   ANTLR grammars-v4/R.g4 (heavy dep + parse-everything-then-deny) and lark (extra
+   dep) because a bounded expression grammar is small, auditable, and safe by
+   construction on Python-only Anvil. Unlocks `mutate(name = expr)` and compound
+   `filter(expr)` with `+ - * / ^ %% == != < <= > >= & | ! %in%`, `c(...)`, and
+   whitelisted funcs (`log`/`exp`/`sqrt`/`abs`/`round`/`ifelse`/`is.na`/`as.*`/
+   `toupper`/`tolower`/`nchar`/`substr`). Refuses unknown/disclosive funcs
+   (`max`/`quantile`/`sort`/`system`) and positional `x[1]`.
 3. **Tidyverse breadth**: `select`/`rename`/`arrange`/`distinct`, multi-stat
    `summarise`, `across`, `mutate`; then `left_join`/`pivot_*`.
 4. **base-R analysis idioms**: `aggregate`, `table`, `tapply`, `cor`, `summary`,

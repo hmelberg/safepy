@@ -24,11 +24,6 @@ _AGG_MAP = {
     "mean": "mean", "sum": "sum", "median": "median",
     "sd": "std", "var": "var", "n": "size",
 }
-_CMP = {
-    ">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
-    ">": lambda a, b: a > b, "<": lambda a, b: a < b,
-    "==": lambda a, b: a == b, "!=": lambda a, b: a != b,
-}
 _IDENT = re.compile(r"^[A-Za-z_.][\w.]*$")
 _STAGE = re.compile(r"^([A-Za-z_][\w.]*)\s*\((.*)\)\s*$", re.S)
 
@@ -83,40 +78,37 @@ def _cols(argstr: str) -> list[str]:
     return cols
 
 
-def _literal(tok: str):
-    tok = tok.strip()
-    if (tok[:1], tok[-1:]) in (("'", "'"), ('"', '"')):
-        return tok[1:-1]
-    try:
-        return int(tok)
-    except ValueError:
-        try:
-            return float(tok)
-        except ValueError:
-            raise ValidationError(f"expected a number or quoted string, got {tok!r}",
-                                  kind="syntax")
+def _filter(sf, argstr: str):
+    """``filter(<expr>)`` — evaluate the (possibly compound) predicate against the
+    facade and keep matching rows. The filtered frame stays private."""
+    from .r_expr import eval_expr, parse
+    from .safeframe import SafeColumn
+    mask = eval_expr(parse(argstr), sf)
+    if not isinstance(mask, SafeColumn):
+        raise DisclosureError("filter needs a boolean condition, e.g. filter(age >= 18)")
+    return sf[mask]
 
 
-def _apply_filter(df, argstr: str):
-    """Translate a single ``filter(col OP value)`` predicate to a pandas mask.
-    The filtered frame stays private — it exits only via the terminal summary."""
-    for op in ("==", "!=", ">=", "<=", ">", "<"):
-        parts = _split_top(argstr, [op])
-        if len(parts) == 2:
-            col, val = parts[0].strip(), _literal(parts[1])
-            _need_col(df, col)
-            return df[_CMP[op](df[col], val)]
-    raise ValidationError(f"could not parse filter predicate: {argstr!r}", kind="syntax")
+def _mutate(sf, argstr: str):
+    """``mutate(name = <expr>, ...)`` — add derived columns via the expression
+    parser; returns a new (private) SafeFrame."""
+    from .r_expr import eval_expr, parse
+    for pair in _split_top(argstr, [","]):
+        m = re.match(r"^\s*([A-Za-z_.][\w.]*)\s*=\s*(?!=)(.*)$", pair, re.S)
+        if not m:
+            raise ValidationError(f"mutate needs name = expr, got {pair!r}", kind="syntax")
+        name, expr = m.group(1), m.group(2).strip()
+        sf = sf.assign(**{name: eval_expr(parse(expr), sf)})
+    return sf
 
 
-def _summarise(verbs, df, group, argstr: str) -> Released:
+def _summarise(sf, group, argstr: str) -> Released:
     if group is None:
-        raise DisclosureError(
-            "summarise needs a preceding group_by(...) in this first slice")
+        raise DisclosureError("summarise needs a preceding group_by(...)")
     pairs = _split_top(argstr, [","])
     if len(pairs) != 1:
         raise DisclosureError(
-            "this first slice supports a single summary, e.g. summarise(m = mean(x))")
+            "this dialect supports a single summary, e.g. summarise(m = mean(x))")
     m = re.match(r"^(\w+)\s*=\s*(\w+)\s*\(\s*([\w.]*)\s*\)$", pairs[0].strip())
     if not m:
         raise ValidationError(
@@ -125,18 +117,19 @@ def _summarise(verbs, df, group, argstr: str) -> Released:
     if fn not in _AGG_MAP:
         raise DisclosureError(
             f"aggregation '{fn}' is not allowed; choose one of {sorted(_AGG_MAP)}")
+    df = sf._df
     agg = _AGG_MAP[fn]
     value = _need_col(df, col) if col else (group[0] if fn == "n" else None)
     by = group[0] if len(group) == 1 else group
-    return verbs.group_agg(df, by, value, agg)
+    return sf._verbs.group_agg(df, by, value, agg)
 
 
-def _count(verbs, df, argstr: str) -> Released:
+def _count(sf, argstr: str) -> Released:
     cols = _cols(argstr)
     if len(cols) != 1:
-        raise DisclosureError("count(col) supports a single column in this first slice")
-    _need_col(df, cols[0])
-    return verbs.value_counts(df, cols[0])
+        raise DisclosureError("count(col) supports a single column in this dialect")
+    _need_col(sf._df, cols[0])
+    return sf._verbs.value_counts(sf._df, cols[0])
 
 
 _MODEL_CALL = re.compile(r"^(lm|glm)\s*\((.*)\)\s*$", re.S)
@@ -199,28 +192,28 @@ def translate_r(code: str, verbs, sources: dict) -> Released:
     src = stages[0].strip()
     if "<-" in src:                      # `result <- df |> ...`: take the data name
         src = src.split("<-", 1)[1].strip()
-    if src not in sources:
-        raise ValidationError(f"unknown data source: {src!r}", kind="name")
-    df = sources[src]
-    if hasattr(df, "to_pandas"):         # accept a polars frame too
-        df = df.to_pandas()
+    from .safeframe import SafeFrame
+    df = _resolve_df(src, sources)
+    sf = SafeFrame(df, verbs)            # the shared STRICT facade — option 1 reuse
 
     group = None
     for stage in stages[1:]:
         verb, argstr = _parse_stage(stage)
         if verb == "filter":
-            df = _apply_filter(df, argstr)
+            sf = _filter(sf, argstr)
+        elif verb == "mutate":
+            sf = _mutate(sf, argstr)
         elif verb == "group_by":
             group = _cols(argstr)
             for c in group:
-                _need_col(df, c)
+                _need_col(sf._df, c)
         elif verb in ("summarise", "summarize"):
-            return _summarise(verbs, df, group, argstr)
+            return _summarise(sf, group, argstr)
         elif verb == "count":
-            return _count(verbs, df, argstr)
+            return _count(sf, argstr)
         else:
             raise DisclosureError(
-                f"R verb '{verb}' is not supported in this first slice "
-                "(group_by, summarise, count, filter)")
+                f"R verb '{verb}' is not supported "
+                "(group_by, summarise, count, filter, mutate)")
     raise DisclosureError(
         "R pipeline did not end in a releasable summary (summarise/count)")

@@ -68,6 +68,37 @@ def test_grouped_small_group_suppressed():
     assert r.ok and _as_dict(r.payload)["Z"] is None
 
 
+# ---- expression parser: mutate + compound filter ----------------------------
+
+def test_mutate_arithmetic_then_summarise_matches_pandas():
+    p = _pandas("df.assign(k=df['salary'] / 1000).groupby('sex')['k'].mean()")
+    r = _r("df |> mutate(k = salary / 1000) |> group_by(sex) |> summarise(m = mean(k))")
+    assert r.ok and _as_dict(r.payload) == _as_dict(p.payload)
+
+
+def test_mutate_log_uses_np_and_matches_pandas():
+    p = _pandas("df.assign(l=np.log(df['salary'])).groupby('sex')['l'].mean()")
+    r = _r("df |> mutate(l = log(salary)) |> group_by(sex) |> summarise(m = mean(l))")
+    assert r.ok and _as_dict(r.payload) == _as_dict(p.payload)
+
+
+def test_compound_filter_matches_pandas():
+    p = _pandas("df[(df['salary'] >= 40000) & (df['sex'] == 'F')]['region'].value_counts()")
+    r = _r("df |> filter(salary >= 40000 & sex == 'F') |> count(region)")
+    assert r.ok and _as_dict(r.payload) == _as_dict(p.payload)
+
+
+def test_filter_in_operator_matches_pandas():
+    p = _pandas("df[df['region'].isin(['A', 'B'])]['region'].value_counts()")
+    r = _r("df |> filter(region %in% c('A', 'B')) |> count(region)")
+    assert r.ok and _as_dict(r.payload) == _as_dict(p.payload)
+
+
+def test_mutate_ifelse_bucket():
+    r = _r("df |> mutate(band = ifelse(salary >= 50000, 'hi', 'lo')) |> count(band)")
+    assert r.ok and set(_as_dict(r.payload)) == {"hi", "lo"}
+
+
 # ---- base-R modelling reaches the shared facade verbs (the "extras") ---------
 
 def test_lm_matches_pandas_ols():
@@ -101,6 +132,13 @@ def test_glm_non_family_refused():
     "system('ls')",                                          # code execution attempt
     "df$salary",                                             # raw column access
     "nope |> count(region)",                                 # unknown source
+    # expression-level escapes: unknown/disclosive functions must be refused
+    "df |> mutate(x = max(salary)) |> group_by(sex) |> summarise(m = mean(x))",
+    "df |> mutate(x = system('ls')) |> count(sex)",
+    "df |> mutate(x = quantile(salary)) |> count(sex)",
+    "df |> filter(sort(salary) > 0) |> count(sex)",
+    "df |> mutate(x = nope(salary)) |> count(sex)",          # unknown function
+    "df |> mutate(x = salary[1]) |> count(sex)",             # positional -> parse error
 ])
 def test_disclosive_or_unknown_r_refused(code):
     assert _r(code).ok is False
