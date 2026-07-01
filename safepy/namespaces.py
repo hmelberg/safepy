@@ -140,9 +140,13 @@ class SafePd:
         verbs = row._verbs
         k = verbs._min_n(min_n)
         tab = pd.crosstab(row._s, col._s)
-        from .safe import _stop_if_too_sparse
+        from .safe import _stop_if_too_sparse, _noise_count_table
         _stop_if_too_sparse(tab.to_numpy(), verbs._policy)
-        safe = protect.suppress(tab, counts=tab, min_n=k, round=verbs._round(round))
+        noising = bool(verbs._policy.suppression.count_noise)
+        safe = protect.suppress(tab, counts=tab, min_n=k,
+                                round=None if noising else verbs._round(round))
+        if noising:
+            safe = _noise_count_table(safe, verbs._policy)
         return Released(frame_payload(safe), audit={
             "kind": "table", "verb": "crosstab", "min_n": k, "backend": "pandas"})
 

@@ -17,6 +17,10 @@ table of counts).
 
 from __future__ import annotations
 
+import hashlib
+import os
+
+import numpy as np
 import pandas as pd
 
 from ._payload import series_payload, frame_payload
@@ -29,6 +33,53 @@ try:
     import protect
 except ImportError:  # pragma: no cover
     protect = None
+
+# Tiltak 3 (støylegging): counts of units are perturbed by deterministic
+# cell-key noise. The noise for a cell is a function of the cell's label and a
+# secret salt, so the SAME cell yields the SAME noise on every query — repeating
+# a query cannot average the noise away. protect.noise is positional (not
+# cell-keyed) and so cannot provide this; the salted-hash seeding here is the one
+# piece of SDC orchestration safepy layers on top of protect's primitives.
+#
+# The salt MUST be secret in production (safepy is open source, so a known salt
+# lets an attacker subtract the noise). Set SAFEPY_NOISE_SALT in the deployment.
+_NOISE_SALT = os.environ.get("SAFEPY_NOISE_SALT", "safepy-default-INSECURE-salt")
+
+
+def _cell_noise(key, step: int) -> int:
+    """Deterministic integer noise in ``[-step, step]`` for a cell identified by
+    ``key`` (a label or (row, col) tuple)."""
+    digest = hashlib.blake2b(f"{_NOISE_SALT}\x00{key!r}".encode(), digest_size=8).digest()
+    rng = np.random.default_rng(int.from_bytes(digest, "big"))
+    return int(rng.integers(-step, step + 1))
+
+
+def _noise_count_table(counts, policy):
+    """Add cell-key noise to a table of counts (Series or DataFrame), flooring at
+    0 and leaving suppressed (NaN) cells untouched (Tiltak 3)."""
+    step = policy.suppression.count_noise
+    if not step:
+        return counts
+    step = int(step)
+    noise1 = lambda key, v: v if pd.isna(v) else float(max(0, int(round(v)) + _cell_noise(key, step)))
+    if isinstance(counts, pd.Series):
+        return pd.Series({i: noise1(i, v) for i, v in counts.items()}, name=counts.name)
+    out = counts.astype(float).copy()
+    for i in out.index:
+        for c in out.columns:
+            out.at[i, c] = noise1((i, c), out.at[i, c])
+    return out
+
+
+def _noised_counts(counts: pd.Series, policy) -> pd.Series:
+    """The noised version of a group-size Series (per group label), used to keep
+    a released sum consistent with its count: noised_sum = mean * noised_count."""
+    step = policy.suppression.count_noise
+    if not step:
+        return counts
+    step = int(step)
+    return pd.Series({i: max(0, int(round(v)) + _cell_noise(i, step)) for i, v in counts.items()},
+                     name=counts.name)
 
 # Safe *given* a minimum group size. Extremes (max/min/quantile) are absent on
 # purpose: they return individual values regardless of group size.
@@ -76,7 +127,6 @@ def _stop_if_too_sparse(counts, policy):
     share = policy.suppression.max_low_cell_share
     if share is None:
         return
-    import numpy as np
     flat = np.asarray(counts).ravel()
     flat = flat[~pd.isna(flat)]
     if flat.size == 0:
@@ -120,11 +170,32 @@ class SafeVerbs(StatsMixin):
         work = _winsorize_col(df, value, self._policy) if agg in _WINSOR_AGGS else df
         grouped = work.groupby(by, observed=True)[value]
         table = counts if agg == "size" else getattr(grouped, agg)()
-        safe = protect.suppress(table, counts=counts, min_n=k, round=self._round(round))
+        noising = bool(self._policy.suppression.count_noise)
+        # when noising counts, don't also round them (rounding would swamp the noise)
+        rnd = None if (noising and agg in ("count", "size")) else self._round(round)
+        safe = protect.suppress(table, counts=counts, min_n=k, round=rnd)
+        if noising:
+            safe = self._apply_count_noise(safe, table, counts, agg)
         return Released(series_payload(safe, name=f"{agg}({value})"), audit={
             "kind": "table", "verb": "group_agg", "agg": agg, "by": by,
             "value": value, "min_n": k, "groups": int(len(counts)),
+            "count_noise": self._policy.suppression.count_noise,
             "cells_suppressed": int((counts < k).sum()), "backend": "pandas"})
+
+    def _apply_count_noise(self, safe, table, counts, agg):
+        """Tiltak 3 for a grouped release: noise the counts, and keep sums/means
+        consistent with the noised count (mean = sum/count is preserved; a cell
+        whose noised count is 0 releases sum 0 and mean NaN)."""
+        if agg in ("count", "size"):
+            return _noise_count_table(safe, self._policy)
+        nc = _noised_counts(counts, self._policy).reindex(safe.index)
+        if agg == "sum":
+            tc = counts.reindex(safe.index)
+            # scale so mean = sum/count is preserved; nc==0 -> 0, suppressed -> NaN
+            return safe * (nc / tc)
+        if agg == "mean":
+            return safe.where(nc > 0, np.nan)         # 0 units behind the mean -> NaN
+        return safe                                    # median/std/var: not count-based
 
     def group_agg_multi(self, df: pd.DataFrame, by, value: str, stats,
                         *, min_n=None, round=None) -> Released:
@@ -168,9 +239,14 @@ class SafeVerbs(StatsMixin):
         k = self._min_n(min_n)
         counts = df[col].value_counts()
         _stop_if_too_sparse(counts.to_numpy(), self._policy)
-        safe = protect.suppress(counts, counts=counts, min_n=k, round=self._round(round))
+        noising = bool(self._policy.suppression.count_noise)
+        safe = protect.suppress(counts, counts=counts, min_n=k,
+                                round=None if noising else self._round(round))
+        if noising:
+            safe = _noise_count_table(safe, self._policy)
         return Released(series_payload(safe, name=f"count({col})"), audit={
             "kind": "table", "verb": "value_counts", "col": col, "min_n": k,
+            "count_noise": self._policy.suppression.count_noise,
             "cells_suppressed": int((counts < k).sum()), "backend": "pandas"})
 
     def crosstab(self, df: pd.DataFrame, row: str, col: str,
@@ -182,10 +258,15 @@ class SafeVerbs(StatsMixin):
         k = self._min_n(min_n)
         tab = pd.crosstab(df[row], df[col])
         _stop_if_too_sparse(tab.to_numpy(), self._policy)
-        safe = protect.suppress(tab, counts=tab, min_n=k, round=self._round(round))
+        noising = bool(self._policy.suppression.count_noise)
+        safe = protect.suppress(tab, counts=tab, min_n=k,
+                                round=None if noising else self._round(round))
+        if noising:
+            safe = _noise_count_table(safe, self._policy)
         return Released(frame_payload(safe), audit={
             "kind": "table", "verb": "crosstab", "row": row, "col": col,
-            "min_n": k, "backend": "pandas"})
+            "min_n": k, "count_noise": self._policy.suppression.count_noise,
+            "backend": "pandas"})
 
     def pivot_table(self, df: pd.DataFrame, *, values: str, index, columns=None,
                     aggfunc: str = "mean", min_n=None, round=None) -> Released:
@@ -211,8 +292,21 @@ class SafeVerbs(StatsMixin):
         counts = df.pivot_table(values=values, index=idx, columns=cols,
                                 aggfunc="count").reindex_like(tab)
         _stop_if_too_sparse(counts.to_numpy(), self._policy)
-        safe = protect.suppress(tab, counts=counts, min_n=k, round=self._round(round))
+        noising = bool(self._policy.suppression.count_noise)
+        pure_count = aggfunc in ("count", "size")
+        safe = protect.suppress(tab, counts=counts, min_n=k,
+                                round=None if (noising and pure_count) else self._round(round))
+        if noising:
+            if pure_count:
+                safe = _noise_count_table(safe, self._policy)
+            elif aggfunc == "sum":
+                nc = _noise_count_table(counts, self._policy)
+                safe = safe * (nc / counts)                 # preserve mean; 0->0
+            elif aggfunc == "mean":
+                nc = _noise_count_table(counts, self._policy)
+                safe = safe.where(nc > 0, np.nan)
         return Released(frame_payload(safe), audit={
             "kind": "table", "verb": "pivot_table", "aggfunc": aggfunc,
             "index": idx, "columns": cols, "values": values, "min_n": k,
+            "count_noise": self._policy.suppression.count_noise,
             "cells_suppressed": int((counts < k).sum().sum()), "backend": "pandas"})

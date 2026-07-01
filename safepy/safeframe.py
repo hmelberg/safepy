@@ -32,7 +32,7 @@ import pandas as pd
 from ._payload import frame_payload, series_payload
 from .errors import DisclosureError
 from .result import Released
-from .safe import SafeVerbs, _stop_if_too_sparse
+from .safe import SafeVerbs, _stop_if_too_sparse, _noise_count_table, _cell_noise
 from .stats import _num
 
 try:
@@ -472,17 +472,34 @@ class SafeColumn:
         raw = src.count() if stat == "count" else getattr(src, stat)()
         suppressed = n < k
         value = None
+        report_n = None if suppressed else n
+        step = policy.suppression.count_noise
         if not suppressed:
             value = _num(raw)
             sf = policy.suppression.percentile_sig_figs
             rt = policy.round_to
-            if stat == "median" and sf:            # Tiltak 8: percentile precision
+            # Tiltak 3: noise the count; keep sum consistent with the noised count
+            # (mean = sum/count preserved); a 0 noised count gives sum 0 / mean NaN.
+            if step and stat in ("count", "sum", "mean"):
+                nn = max(0, n + _cell_noise(str(self._s.name), int(step)))
+                report_n = nn
+                if stat == "count":
+                    value = float(nn)
+                elif stat == "sum":
+                    value = value * (nn / n) if n else 0.0
+                elif stat == "mean" and nn == 0:
+                    value = None
+            if value is None:
+                pass
+            elif stat == "median" and sf:          # Tiltak 8: percentile precision
                 value = _sig_round(value, sf)
-            elif apply_round and rt is not None and value is not None:
+            elif stat == "count" and step:         # a noised count is not also rounded
+                pass
+            elif apply_round and rt is not None:
                 value = float(round(value / rt) * rt)
-        return Released({"type": "scalar", "stat": stat, "value": value, "n": (None if suppressed else n)},
+        return Released({"type": "scalar", "stat": stat, "value": value, "n": report_n},
                         audit={"kind": "scalar", "verb": f"column.{stat}", "min_n": k,
-                               "suppressed": suppressed, "backend": "pandas"})
+                               "count_noise": step, "suppressed": suppressed, "backend": "pandas"})
 
     # -- order statistics: released only if >= min_n observations lie at/beyond
     #    the value (min(#<=v, #>=v) >= min_n). Median/quartiles pass; extremes
@@ -602,8 +619,13 @@ class SafeColumn:
             raise DisclosureError("the 'protect' package is required")
         k = self._verbs._min_n(min_n)
         counts = self._s.value_counts()
-        _stop_if_too_sparse(counts.to_numpy(), self._verbs._policy)
-        safe = protect.suppress(counts, counts=counts, min_n=k, round=self._verbs._round(round))
+        policy = self._verbs._policy
+        _stop_if_too_sparse(counts.to_numpy(), policy)
+        noising = bool(policy.suppression.count_noise)
+        safe = protect.suppress(counts, counts=counts, min_n=k,
+                                round=None if noising else self._verbs._round(round))
+        if noising:
+            safe = _noise_count_table(safe, policy)
         return Released(series_payload(safe, name=f"count({self._s.name})"), audit={
             "kind": "table", "verb": "value_counts", "min_n": k,
             "cells_suppressed": int((counts < k).sum()), "backend": "pandas"})
@@ -1102,6 +1124,7 @@ class SafeFrame:
         k = policy.min_n if stat in ("count", "sum", "nunique") else _descriptive_k(policy)
         sf = policy.suppression.percentile_sig_figs
         rt = policy.round_to
+        step = policy.suppression.count_noise
         index, values, suppressed = [], [], 0
         for c in cols.columns:
             s = cols[c]
@@ -1114,9 +1137,22 @@ class SafeFrame:
             v = s.count() if stat == "count" else (
                 int(s.nunique()) if stat == "nunique" else getattr(src, stat)())
             v = _num(v)
-            if stat == "median" and sf:
+            noised_count = None
+            if step and stat in ("count", "sum", "mean"):   # Tiltak 3
+                noised_count = max(0, n + _cell_noise(str(c), int(step)))
+                if stat == "count":
+                    v = float(noised_count)
+                elif stat == "sum":
+                    v = v * (noised_count / n) if n else 0.0
+                elif stat == "mean" and noised_count == 0:
+                    v = None
+            if v is None:
+                pass
+            elif stat == "median" and sf:
                 v = _sig_round(v, sf)
-            elif rounded and rt is not None and v is not None:
+            elif stat == "count" and step:
+                pass                                        # noised count not rounded
+            elif rounded and rt is not None:
                 v = float(round(v / rt) * rt)
             values.append(v)
         return Released({"type": "series", "name": stat, "index": index, "values": values},

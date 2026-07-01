@@ -84,8 +84,8 @@ PRESETS: dict[str, Suppression] = {
         intercept_k_anon=5),
     "microdata": Suppression(
         min_n=5, round_to=10, min_population=1000, winsorize=(0.01, 0.99),
-        max_low_cell_share=0.5, min_edit_units=10, min_descriptive_n=10,
-        percentile_sig_figs=3, intercept_k_anon=5),
+        count_noise=2, max_low_cell_share=0.5, min_edit_units=10,
+        min_descriptive_n=10, percentile_sig_figs=3, intercept_k_anon=5),
 }
 
 # Which tier each protection level gets by default.
