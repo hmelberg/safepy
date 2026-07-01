@@ -104,3 +104,32 @@ class SafeVerbs(StatsMixin):
         return Released(frame_payload(safe), audit={
             "kind": "table", "verb": "crosstab", "row": row, "col": col,
             "min_n": k, "backend": "pandas"})
+
+    def pivot_table(self, df: pd.DataFrame, *, values: str, index, columns=None,
+                    aggfunc: str = "mean", min_n=None, round=None) -> Released:
+        """``df.pivot_table(...)`` — a 2-D aggregation (crosstab generalised to any
+        value + aggfunc). Each cell is paired with its contributing row count and
+        suppressed below ``min_n``; the raw ``pivot`` reshape (no aggfunc) is
+        refused by the gate because it would place individual values in cells."""
+        if protect is None:
+            raise DisclosureError("the 'protect' package is required")
+        if aggfunc not in _ALLOWED_AGGS:
+            raise DisclosureError(
+                f"aggfunc '{aggfunc}' is not allowed; choose one of {sorted(_ALLOWED_AGGS)}")
+        df = _unwrap(df)
+        k = self._min_n(min_n)
+        idx = [index] if isinstance(index, str) else list(index)
+        cols = None if columns is None else ([columns] if isinstance(columns, str) else list(columns))
+        for c in idx + (cols or []) + [values]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        func = "size" if aggfunc == "size" else aggfunc
+        tab = df.pivot_table(values=values, index=idx, columns=cols, aggfunc=func)
+        # contributing (non-null) count per cell — the basis for suppression
+        counts = df.pivot_table(values=values, index=idx, columns=cols,
+                                aggfunc="count").reindex_like(tab)
+        safe = protect.suppress(tab, counts=counts, min_n=k, round=self._round(round))
+        return Released(frame_payload(safe), audit={
+            "kind": "table", "verb": "pivot_table", "aggfunc": aggfunc,
+            "index": idx, "columns": cols, "values": values, "min_n": k,
+            "cells_suppressed": int((counts < k).sum().sum()), "backend": "pandas"})

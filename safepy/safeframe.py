@@ -151,6 +151,24 @@ def _unwrap_val(x):
     return x._s if isinstance(x, SafeColumn) else x
 
 
+def _check_recode(to_replace, value):
+    """Guard ``replace`` inputs: allow scalars, lists, and {old: new} mappings,
+    but never a callable (which would be arbitrary code) or a regex pattern.
+    Recoding is a value→value relabel, so it stays non-disclosive."""
+    def walk(v):
+        if callable(v):
+            raise DisclosureError(
+                "replace does not accept functions; pass a value or a {old: new} mapping")
+        if isinstance(v, dict):
+            for k, sub in v.items():
+                walk(k); walk(sub)
+        elif isinstance(v, (list, tuple)):
+            for sub in v:
+                walk(sub)
+    walk(to_replace)
+    walk(value)
+
+
 def _order_stat(s, kind, k, *, q=None, winsorize=None):
     """Return ``(value_or_None, support)`` for an order statistic under the rule:
     releasable iff ``min(#<=v, #>=v) >= min_n`` (at least min_n observations at or
@@ -264,6 +282,32 @@ class SafeColumn:
     def astype(self, dtype): return self._col(self._s.astype(dtype))
     def round(self, n=0): return self._col(self._s.round(n))
     def clip(self, lower=None, upper=None): return self._col(self._s.clip(lower, upper))
+    def abs(self): return self._col(self._s.abs())
+
+    def replace(self, to_replace, value=None):
+        """Recode values: replace({'M': 'Male'}) or replace('M', 'Male'). A
+        value→value relabel, so the column stays private."""
+        _check_recode(to_replace, value)
+        s = self._s.replace(to_replace) if value is None else self._s.replace(to_replace, value)
+        return self._col(s)
+
+    # -- per-row derived columns (order-dependent; sort_values first for panels).
+    #    Each returns a private SafeColumn -> released only via a suppressed
+    #    aggregation, so no new disclosure path. --
+    def shift(self, periods=1): return self._col(self._s.shift(periods))
+
+    def diff(self, periods=1): return self._col(self._s.diff(periods))
+
+    def _num_series(self, verb):
+        if not pd.api.types.is_numeric_dtype(self._s):
+            raise DisclosureError(f"{verb} is for numeric columns")
+        return self._s
+
+    def cumsum(self): return self._col(self._num_series("cumsum").cumsum())
+    def cummax(self): return self._col(self._num_series("cummax").cummax())
+    def cummin(self): return self._col(self._num_series("cummin").cummin())
+    def pct_change(self, periods=1):
+        return self._col(self._num_series("pct_change").pct_change(periods))
 
     @property
     def dt(self): return _SafeDt(self._s, self._verbs)
@@ -281,6 +325,19 @@ class SafeColumn:
     def median(self): return self._reduce("median")
     def std(self): return self._reduce("std")
     def var(self): return self._reduce("var")
+
+    def nunique(self) -> Released:
+        """Count of distinct values — an aggregate, suppressed if the column has
+        fewer than ``min_n`` non-null rows."""
+        k = self._verbs._policy.min_n
+        n = int(self._s.notna().sum())
+        suppressed = n < k
+        return Released(
+            {"type": "scalar", "stat": "nunique",
+             "value": None if suppressed else int(self._s.nunique()),
+             "n": None if suppressed else n},
+            audit={"kind": "scalar", "verb": "column.nunique", "min_n": k,
+                   "suppressed": suppressed, "backend": "pandas"})
 
     def _reduce(self, stat: str) -> Released:
         k = self._verbs._policy.min_n
@@ -701,6 +758,31 @@ class SafeFrame:
                 raise DisclosureError(f"unknown column: {c}")
         return SafeFrame(self._df.drop(columns=cols), self._verbs)
 
+    def replace(self, to_replace, value=None) -> "SafeFrame":
+        """Recode values across the frame: replace({'sex': {'M': 'Male'}}) or
+        replace('N/A', None). A value→value relabel, so the frame stays private."""
+        _check_recode(to_replace, value)
+        out = self._df.replace(to_replace) if value is None else self._df.replace(to_replace, value)
+        return SafeFrame(out, self._verbs)
+
+    def sort_values(self, by, *, ascending=True) -> "SafeFrame":
+        """Reorder rows (useful before shift/diff/cumsum on panel data). The frame
+        stays private — there is no head/iloc to read the ordering back out."""
+        cols = [by] if isinstance(by, str) else list(by)
+        for c in cols:
+            if c not in self._df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        return SafeFrame(self._df.sort_values(by=cols, ascending=ascending), self._verbs)
+
+    def drop_duplicates(self, subset=None) -> "SafeFrame":
+        if subset is not None:
+            cols = [subset] if isinstance(subset, str) else list(subset)
+            for c in cols:
+                if c not in self._df.columns:
+                    raise DisclosureError(f"unknown column: {c}")
+            subset = cols
+        return SafeFrame(self._df.drop_duplicates(subset=subset), self._verbs)
+
     def assign(self, *args, **kwargs) -> "SafeFrame":
         """Add derived columns. Two forms:
 
@@ -725,6 +807,10 @@ class SafeFrame:
 
     def crosstab(self, row: str, col: str, **kw) -> Released:
         return self._verbs.crosstab(self._df, row, col, **kw)
+
+    def pivot_table(self, *, values, index, columns=None, aggfunc="mean", **kw) -> Released:
+        return self._verbs.pivot_table(self._df, values=values, index=index,
+                                       columns=columns, aggfunc=aggfunc, **kw)
 
     # -- hypothesis tests --
     def ttest(self, *, value, by=None, mu=0.0, **kw) -> Released:

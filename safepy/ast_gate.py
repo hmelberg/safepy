@@ -78,6 +78,9 @@ _DENIED_METHODS: frozenset = frozenset({
     # --- accept arbitrary callables / mini-language code ---
     "apply", "applymap", "map", "transform", "pipe", "agg", "aggregate",
     "query", "eval", "rolling", "expanding", "ewm",
+    # --- raw reshape: places individual values in cells (use pivot_table, which
+    #     aggregates + suppresses; stack/unstack likewise reshape raw rows) ---
+    "pivot", "stack", "unstack", "melt", "explode", "wide_to_long",
     # --- rendering surface that embeds raw arrays ---
     # 'plot'/'hist'/'boxplot' are intentionally NOT here: plotting is enforced by
     # type instead. It exists only on aggregate results (Released.plot) and, for
