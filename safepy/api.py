@@ -36,7 +36,8 @@ def _build_namespace(profile: Profile, policy: Policy, sources: dict[str, Any]) 
     verbs = SafeVerbs(policy)
     if profile is Profile.STRICT:
         from .namespaces import SafeNp, SafePd
-        return {"safe": verbs, "pd": SafePd(), "np": SafeNp(),
+        from .formula_api import SafeStats
+        return {"safe": verbs, "pd": SafePd(), "np": SafeNp(), "smf": SafeStats(verbs),
                 **{name: SafeFrame(df, verbs) for name, df in sources.items()}}
     return {"pd": pd, "np": np, "safe": verbs, **sources}
 

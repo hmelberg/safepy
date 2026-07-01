@@ -36,7 +36,7 @@ run("df.groupby('sex')['salary'].mean()", {"df": df}, **S)              # suppre
 run("df[df['age'] >= 40]['salary'].median()", {"df": df}, **S)         # suppressed scalar
 run("df[(df['age'] >= 40) & (df['sex'] == 'F')].groupby('region')['salary'].mean()", {"df": df}, **S)
 run("df['region'].value_counts()", {"df": df}, **S)
-run("df.ols(y='salary', x=['age', 'sex'])", {"df": df}, **S)            # statsmodels
+run('smf.ols("salary ~ age + C(sex)", data=df).fit().summary()', {"df": df}, **S)  # formula API
 run("df.kaplan_meier(duration='dur', event='died', by='sex')", {"df": df}, **S)  # lifelines
 
 run("df['salary'].max()", {"df": df}, **S)   # ok=False: extremes reveal individuals

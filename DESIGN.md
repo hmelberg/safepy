@@ -130,10 +130,13 @@ do not.
 (lifelines), reachable as `safe.ols(...)` and as `SafeFrame.ols(...)`. Two
 disclosure dangers shaped the design:
 
-- **No user formula strings.** A patsy formula is `eval`-ed, and the AST gate
-  can't see inside a string literal — so a raw formula would re-open the
-  code-execution channel. Callers pass column *names*; we validate each
-  (`^[A-Za-z_]\w*$` + must be a real column) and build the formula ourselves.
+- **No *raw* user formula strings reach patsy.** A patsy formula is `eval`-ed,
+  and the AST gate can't see inside a string literal. Two safe entry points:
+  the keyword API (`safe.ols(y=, x=[])`) builds the formula from validated
+  names; and the `smf` facade (`smf.ols("y ~ age + C(sex)", data=df)`) accepts a
+  formula string but **parses it with our own whitelisted grammar**
+  (`formula.py`) and reconstructs a canonical formula from validated tokens —
+  patsy only ever sees names it can't turn into code.
 - **Per-coefficient suppression.** A dummy for a categorical level with few
   members leaks those individuals. After fitting, we compute the support behind
   every term and blank any coefficient/CI/p-value with support `< min_n` (Cox
@@ -179,7 +182,11 @@ safestat spec, so it collapses onto m2py's `resolve_policy` when integrated.
    **(done, phase 2)** attribute access (`df.salary`, `df.groupby('sex').salary`),
    look-alike `pd`/`np` namespaces (`np.log`/`np.where`, `pd.cut`/`pd.crosstab`/
    `pd.to_datetime`, in `namespaces.py`), and natural `df.assign(col=np.log(df['x']))`.
-   Next: `smf.ols("y ~ x")` safe formula parser (phase 3); coverage sweep (phase 4).
+   **(done, phase 3)** `smf.ols/logit/poisson("y ~ age + C(sex)", data=df).fit()
+   .summary()` via our own whitelisted formula parser (`formula.py`,
+   `formula_api.py`) — the user string is validated and reconstructed, never
+   handed to patsy; per-coefficient suppression; `.predict`/`.resid` unreachable.
+   Next: coverage sweep against the real script corpus (phase 4).
 3. **(done)** statsmodels (`ols`/`logit`/`poisson`) + lifelines (`cox`/
    `kaplan_meier`) safe verbs, with per-coefficient / at-risk suppression and no
    user formula strings.
