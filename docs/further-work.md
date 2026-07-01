@@ -33,9 +33,14 @@ Consolidated list of deferred work. Each has enough of a note to pick up later.
   rests on the audit layer, so loops are the one feature not secure-by-
   construction. Decide explicitly before enabling.
 - **Security hardening / audit** — adversarial audit + expanded red-team of the
-  `SafeColumn`/`SafeFrame` non-revelation invariant (the linchpin); wire
-  `protect`'s dominance / p% / secondary suppression into the verbs (only
-  `min_n` + rounding are wired today).
+  `SafeColumn`/`SafeFrame` non-revelation invariant (the linchpin).
+- **Secondary suppression — remaining Tiltak** — the configurable tier system and
+  measures 1/2/5/6/7/8 are wired (see [suppression-measures.md](suppression-measures.md)).
+  Still to do: **Tiltak 3** noise on counts (`protect.noise`, proportional sum
+  adjustment), **Tiltak 9** intercept hiding on low k-anonymity (`protect.risk`),
+  **Tiltak 10** micro-aggregation + smoothing before percentiles, and **Tiltak 4**
+  hexbin scatter (needs a scatter surface first). Also wire `protect`'s dominance /
+  p% / complementary secondary suppression into released tables.
 - **Multi-query audit / budget layer** — track queries across a session to
   mitigate differencing/averaging attacks (prerequisite for loops).
 - **Server integration** — wire `run()` + the `render` pipeline + `catalog` into

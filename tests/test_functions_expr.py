@@ -36,7 +36,7 @@ def test_expr_math_funcs():
 
 def test_expr_binary_and_round():
     assert _strict("df.assign('c', 'minimum(salary, 50000)').groupby('sex')['c'].mean()").ok
-    assert _strict("df.assign('r', 'round(salary, -3)').value_counts('r')").ok
+    assert _strict("df.assign('r', 'round(salary, -3)').groupby('sex')['r'].mean()").ok
 
 
 def test_expr_where_with_comparison():

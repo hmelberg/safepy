@@ -44,6 +44,51 @@ def _unwrap(df):
     return df._df if getattr(df, "_is_safeframe", False) else df
 
 
+# Grouped moment aggregates winsorization affects (Tiltak 2).
+_WINSOR_AGGS = frozenset({"mean", "std", "var", "sum"})
+
+
+def _winsorize_col(df, col, policy):
+    """Return ``df`` with ``col`` winsorized per the policy (Tiltak 2), or
+    unchanged if off / non-numeric. Group sizes are taken from the original df, so
+    only the values (not the counts) are capped."""
+    w = policy.suppression.winsorize
+    if (w is None or protect is None or not pd.api.types.is_numeric_dtype(df[col])
+            or pd.api.types.is_bool_dtype(df[col])):   # bools/indicators not winsorized
+        return df
+    return protect.winsorize(df, col, limits=(float(w[0]), float(w[1])))
+
+
+def _agg_min_n(policy, agg):
+    """Suppression threshold for a grouped aggregate: counts/sums/size use the
+    primary ``min_n``; descriptive aggregates (mean/median/std/var) get the
+    higher Tiltak 7/1 descriptive-population floor."""
+    if agg in ("count", "size", "sum"):
+        return policy.min_n
+    from .safeframe import _descriptive_k  # lazy: safeframe imports this module
+    return _descriptive_k(policy)
+
+
+def _stop_if_too_sparse(counts, policy):
+    """Tiltak 5: refuse a frequency table when more than
+    ``max_low_cell_share`` of its cells fall below ``min_n`` — such tables both
+    ease indirect identification and carry high relative noise."""
+    share = policy.suppression.max_low_cell_share
+    if share is None:
+        return
+    import numpy as np
+    flat = np.asarray(counts).ravel()
+    flat = flat[~pd.isna(flat)]
+    if flat.size == 0:
+        return
+    low = int((flat < policy.min_n).sum())
+    if low / flat.size > share:
+        raise DisclosureError(
+            f"table stopped: more than {int(share * 100)}% of its cells are below "
+            f"the minimum count of {policy.min_n}. Use coarser categories or a "
+            "larger population so cells are better populated.")
+
+
 class SafeVerbs(StatsMixin):
     """Policy-bound safe verbs injected into the sandbox as ``safe``.
 
@@ -70,10 +115,11 @@ class SafeVerbs(StatsMixin):
             raise DisclosureError(
                 f"agg '{agg}' is not allowed; choose one of {sorted(_ALLOWED_AGGS)}")
         df = _unwrap(df)
-        k = self._min_n(min_n)
-        grouped = df.groupby(by, observed=True)[value]
-        table = grouped.size() if agg == "size" else getattr(grouped, agg)()
-        counts = grouped.size()
+        k = max(self._min_n(min_n), _agg_min_n(self._policy, agg))
+        counts = df.groupby(by, observed=True)[value].size()
+        work = _winsorize_col(df, value, self._policy) if agg in _WINSOR_AGGS else df
+        grouped = work.groupby(by, observed=True)[value]
+        table = counts if agg == "size" else getattr(grouped, agg)()
         safe = protect.suppress(table, counts=counts, min_n=k, round=self._round(round))
         return Released(series_payload(safe, name=f"{agg}({value})"), audit={
             "kind": "table", "verb": "group_agg", "agg": agg, "by": by,
@@ -93,9 +139,15 @@ class SafeVerbs(StatsMixin):
             raise DisclosureError(
                 f"agg {bad} not allowed; choose from {sorted(_ALLOWED_AGGS)}")
         df = _unwrap(df)
-        k = self._min_n(min_n)
-        grouped = df.groupby(by, observed=True)[value]
-        counts = grouped.size()
+        # a multi-stat table mixes counts and descriptive stats; use the stricter
+        # descriptive floor when any descriptive stat is present.
+        k = max([self._min_n(min_n)] + [_agg_min_n(self._policy, s) for s in stats])
+        counts = df.groupby(by, observed=True)[value].size()
+        # winsorize the value if any requested stat is moment-based (median barely
+        # moves under 1% winsorization, so a shared source is acceptable).
+        work = _winsorize_col(df, value, self._policy) if any(
+            s in _WINSOR_AGGS for s in stats) else df
+        grouped = work.groupby(by, observed=True)[value]
         table = grouped.agg(["size" if s == "size" else s for s in stats])
         if isinstance(table, pd.Series):        # single stat -> frame
             table = table.to_frame(stats[0])
@@ -115,6 +167,7 @@ class SafeVerbs(StatsMixin):
         df = _unwrap(df)
         k = self._min_n(min_n)
         counts = df[col].value_counts()
+        _stop_if_too_sparse(counts.to_numpy(), self._policy)
         safe = protect.suppress(counts, counts=counts, min_n=k, round=self._round(round))
         return Released(series_payload(safe, name=f"count({col})"), audit={
             "kind": "table", "verb": "value_counts", "col": col, "min_n": k,
@@ -128,6 +181,7 @@ class SafeVerbs(StatsMixin):
         df = _unwrap(df)
         k = self._min_n(min_n)
         tab = pd.crosstab(df[row], df[col])
+        _stop_if_too_sparse(tab.to_numpy(), self._policy)
         safe = protect.suppress(tab, counts=tab, min_n=k, round=self._round(round))
         return Released(frame_payload(safe), audit={
             "kind": "table", "verb": "crosstab", "row": row, "col": col,
@@ -156,6 +210,7 @@ class SafeVerbs(StatsMixin):
         # contributing (non-null) count per cell — the basis for suppression
         counts = df.pivot_table(values=values, index=idx, columns=cols,
                                 aggfunc="count").reindex_like(tab)
+        _stop_if_too_sparse(counts.to_numpy(), self._policy)
         safe = protect.suppress(tab, counts=counts, min_n=k, round=self._round(round))
         return Released(frame_payload(safe), audit={
             "kind": "table", "verb": "pivot_table", "aggfunc": aggfunc,

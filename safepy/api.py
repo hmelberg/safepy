@@ -46,16 +46,19 @@ def run(code: str,
         sources: dict[str, Any],
         level: ProtectionLevel | str = ProtectionLevel.PROTECTED,
         *, profile: Profile | str | None = None,
+        suppression=None,
         render: str = "spec") -> SafeResult:
     """Validate, run, and disclosure-check ``code`` against ``sources``.
 
     ``sources`` maps the names user code may reference (e.g. ``{"df": frame}``)
     to private data objects. ``level`` selects the protection policy; ``profile``
     overrides the executor (OPEN sandbox vs STRICT capability) for that policy.
+    ``suppression`` overrides the secondary-control tier — a preset name
+    (``"light"``/``"standard"``/``"microdata"``) or a ``Suppression`` instance.
     ``render`` picks the transport encoding for chart results:
     ``spec`` (default, JSON) | ``plotly`` | ``png`` | ``html`` | ``ascii``.
     """
-    policy: Policy = resolve_policy([level])
+    policy: Policy = resolve_policy([level], suppression=suppression)
     active = Profile(profile) if profile is not None else policy.profile
     catalog = None  # datasets left in the session (populated once execution runs)
 

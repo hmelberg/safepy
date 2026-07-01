@@ -32,7 +32,7 @@ import pandas as pd
 from ._payload import frame_payload, series_payload
 from .errors import DisclosureError
 from .result import Released
-from .safe import SafeVerbs
+from .safe import SafeVerbs, _stop_if_too_sparse
 from .stats import _num
 
 try:
@@ -169,10 +169,84 @@ def _check_recode(to_replace, value):
     walk(value)
 
 
-def _order_stat(s, kind, k, *, q=None, winsorize=None):
+def _check_edit(old: pd.Series, new: pd.Series, verbs):
+    """Tiltak 6: an edit (recode/replace/fill/clip/where) may not change a number
+    of units in ``[1, k)`` or ``(n-k, n)`` — changing a tiny group, or all but a
+    tiny group, could single individuals out. Changing all rows or none is fine.
+    The message never states the affected count (that count is itself data)."""
+    k = verbs._policy.suppression.min_edit_units
+    if not k:
+        return
+    o, nw = old.to_numpy(), new.to_numpy()
+    same = (o == nw) | (pd.isna(o) & pd.isna(nw))
+    changed = int((~same).sum())
+    n = len(o)
+    if changed == 0 or changed == n:
+        return
+    if changed < k or changed > n - k:
+        raise DisclosureError(
+            f"this edit changes fewer than {k} units (or all but fewer than {k}); "
+            "such edits are not allowed because they can single individuals out. "
+            "Change all rows, none, or at least this many.")
+
+
+def _check_frame_edit(old_df: pd.DataFrame, new_df: pd.DataFrame, verbs):
+    """Tiltak 6 for a frame-wide recode: applied column by column (each recode
+    term must satisfy the rule independently)."""
+    if not verbs._policy.suppression.min_edit_units:
+        return
+    for c in new_df.columns:
+        if c in old_df.columns:
+            _check_edit(old_df[c], new_df[c], verbs)
+
+
+def _sig_round(v, sig_figs):
+    """Round to ``sig_figs`` significant figures (Tiltak 8: percentile/median
+    values are actual individual values, so they are shown coarsely)."""
+    import math
+    if v is None or sig_figs is None or v == 0 or not math.isfinite(v):
+        return v
+    d = int(sig_figs) - int(math.floor(math.log10(abs(v)))) - 1
+    return round(v, d)
+
+
+def _descriptive_k(policy):
+    """The suppression threshold for *descriptive* statistics (mean/std/percentile
+    /skew...): the primary ``min_n`` raised by the Tiltak 7 descriptive-population
+    floor and the Tiltak 1 minimum-population floor. Counts/sums use plain min_n."""
+    s = policy.suppression
+    return max(policy.min_n, s.min_descriptive_n or 0, s.min_population or 0)
+
+
+# Moment/magnitude stats that winsorization (Tiltak 2) affects. Order statistics
+# (median/quartiles) are deliberately excluded — they are not winsorized.
+_WINSOR_STATS = frozenset({"mean", "std", "var", "sum", "sem", "skew", "kurt"})
+
+
+def _winsor_p(policy):
+    """The single tail probability for order-stat winsorization, or None. The
+    policy stores (low, high) percentiles; the lower one is the symmetric p."""
+    w = policy.suppression.winsorize
+    return None if w is None else float(w[0])
+
+
+def _winsorized_series(s, policy):
+    """Return ``s`` with its tails capped per the policy (Tiltak 2), using
+    ``protect.winsorize``; unchanged if winsorization is off or the column is not
+    numeric (categorical variables are never winsorized)."""
+    w = policy.suppression.winsorize
+    if (w is None or protect is None or not pd.api.types.is_numeric_dtype(s)
+            or pd.api.types.is_bool_dtype(s)):     # bools/indicators are not winsorized
+        return s
+    capped = protect.winsorize(s.to_frame("v"), "v", limits=(float(w[0]), float(w[1])))
+    return capped["v"]
+
+
+def _order_stat(s, kind, k, *, q=None, winsorize=None, sig_figs=None):
     """Return ``(value_or_None, support)`` for an order statistic under the rule:
     releasable iff ``min(#<=v, #>=v) >= min_n`` (at least min_n observations at or
-    beyond the value). Winsorizing pulls an extreme to a shared quantile bound."""
+    beyond the value). Winsorizing pulls an extreme to a shared quantile bound;
+    ``sig_figs`` (Tiltak 8) coarsens percentile/median values before release."""
     if winsorize is not None and kind in ("min", "max"):
         p = float(winsorize)
         v = float(s.quantile(1 - p if kind == "max" else p))
@@ -183,7 +257,9 @@ def _order_stat(s, kind, k, *, q=None, winsorize=None):
     else:
         v = float(s.quantile(q))
     support = min(int((s <= v).sum()), int((s >= v).sum()))
-    return (v if support >= k else None), support
+    if support < k:
+        return None, support
+    return _sig_round(v, sig_figs), support
 
 
 def _nice_edges(s, bins):
@@ -281,29 +357,34 @@ class SafeColumn:
     # -- light transforms -> derived column --
     def astype(self, dtype): return self._col(self._s.astype(dtype))
     def round(self, n=0): return self._col(self._s.round(n))
-    def clip(self, lower=None, upper=None): return self._col(self._s.clip(lower, upper))
+    def clip(self, lower=None, upper=None): return self._edit(self._s.clip(lower, upper))
     def abs(self): return self._col(self._s.abs())
-    def fillna(self, value): return self._col(self._s.fillna(_unwrap_val(value)))
+    def fillna(self, value): return self._edit(self._s.fillna(_unwrap_val(value)))
+
+    def _edit(self, new_s) -> "SafeColumn":
+        """Return a recoded column after the Tiltak 6 edit-size check."""
+        _check_edit(self._s, new_s, self._verbs)
+        return self._col(new_s)
 
     def where(self, cond, other=np.nan):
         """Keep values where ``cond`` is True, else ``other`` — the idiomatic
         conditional recode. ``cond`` is a boolean SafeColumn."""
         if not isinstance(cond, SafeColumn):
             raise DisclosureError("where needs a boolean column as its condition")
-        return self._col(self._s.where(cond._s, _unwrap_val(other)))
+        return self._edit(self._s.where(cond._s, _unwrap_val(other)))
 
     def mask(self, cond, other=np.nan):
         """Inverse of ``where``: replace where ``cond`` is True."""
         if not isinstance(cond, SafeColumn):
             raise DisclosureError("mask needs a boolean column as its condition")
-        return self._col(self._s.mask(cond._s, _unwrap_val(other)))
+        return self._edit(self._s.mask(cond._s, _unwrap_val(other)))
 
     def replace(self, to_replace, value=None):
         """Recode values: replace({'M': 'Male'}) or replace('M', 'Male'). A
         value→value relabel, so the column stays private."""
         _check_recode(to_replace, value)
         s = self._s.replace(to_replace) if value is None else self._s.replace(to_replace, value)
-        return self._col(s)
+        return self._edit(s)
 
     def map(self, mapping):
         """Recode via a {old: new} mapping (like replace, but unmatched → NaN).
@@ -312,7 +393,7 @@ class SafeColumn:
             raise DisclosureError(
                 "map takes a {old: new} dict (a function would be arbitrary code); "
                 "use replace/where for other recoding")
-        return self._col(self._s.map(mapping))
+        return self._edit(self._s.map(mapping))
 
     # NB: no rank() — it is an order-statistic differencing primitive (rank +
     # filter + sum isolates one value-ordered individual across two above-min_n
@@ -381,15 +462,23 @@ class SafeColumn:
                    "suppressed": suppressed, "backend": "pandas"})
 
     def _reduce(self, stat: str, *, apply_round=True) -> Released:
-        k = self._verbs._policy.min_n
+        policy = self._verbs._policy
+        # counts/sums use the primary min_n; descriptive stats get the higher
+        # descriptive-population floor (Tiltak 7/1).
+        k = policy.min_n if stat in ("count", "sum") else _descriptive_k(policy)
         n = int(self._s.notna().sum())
-        raw = self._s.count() if stat == "count" else getattr(self._s, stat)()
+        # Tiltak 2: moment stats are computed on the winsorized column.
+        src = _winsorized_series(self._s, policy) if stat in _WINSOR_STATS else self._s
+        raw = src.count() if stat == "count" else getattr(src, stat)()
         suppressed = n < k
         value = None
         if not suppressed:
             value = _num(raw)
-            rt = self._verbs._policy.round_to
-            if apply_round and rt is not None and value is not None:
+            sf = policy.suppression.percentile_sig_figs
+            rt = policy.round_to
+            if stat == "median" and sf:            # Tiltak 8: percentile precision
+                value = _sig_round(value, sf)
+            elif apply_round and rt is not None and value is not None:
                 value = float(round(value / rt) * rt)
         return Released({"type": "scalar", "stat": stat, "value": value, "n": (None if suppressed else n)},
                         audit={"kind": "scalar", "verb": f"column.{stat}", "min_n": k,
@@ -410,8 +499,10 @@ class SafeColumn:
 
     def _extreme(self, kind, winsorize):
         s = self._numeric()
-        k = self._verbs._policy.min_n
-        value, support = _order_stat(s, kind, k, winsorize=winsorize)
+        k = _descriptive_k(self._verbs._policy)
+        sf = self._verbs._policy.suppression.percentile_sig_figs
+        w = winsorize if winsorize is not None else _winsor_p(self._verbs._policy)
+        value, support = _order_stat(s, kind, k, winsorize=w, sig_figs=sf)
         return Released(
             {"type": "scalar", "stat": kind, "value": value,
              "n": support if value is not None else None},
@@ -420,8 +511,9 @@ class SafeColumn:
 
     def quantile(self, q, *, winsorize=None):
         s = self._numeric()
-        k = self._verbs._policy.min_n
-        value, support = _order_stat(s, "q", k, q=q, winsorize=winsorize)
+        k = _descriptive_k(self._verbs._policy)
+        sf = self._verbs._policy.suppression.percentile_sig_figs
+        value, support = _order_stat(s, "q", k, q=q, winsorize=winsorize, sig_figs=sf)
         return Released(
             {"type": "scalar", "stat": f"q{q}", "value": value,
              "n": support if value is not None else None},
@@ -430,17 +522,21 @@ class SafeColumn:
 
     def describe(self, *, winsorize=None) -> Released:
         s = self._numeric()
-        k = self._verbs._policy.min_n
+        policy = self._verbs._policy
+        k = _descriptive_k(policy)
+        sf = policy.suppression.percentile_sig_figs
+        w = winsorize if winsorize is not None else _winsor_p(policy)   # Tiltak 2 default
+        sw = _winsorized_series(s, policy)                              # for mean/std
         n = int(s.shape[0])
-        agg = (lambda f: float(f) if n >= k else None)
+        agg = (lambda f: float(f) if n >= k else None)      # mean/std: not sig-rounded
         stats = {
-            "count": n if n >= k else None,
-            "mean": agg(s.mean()), "std": agg(s.std()),
-            "min": _order_stat(s, "min", k, winsorize=winsorize)[0],
-            "25%": _order_stat(s, "q", k, q=0.25)[0],
-            "50%": _order_stat(s, "q", k, q=0.50)[0],
-            "75%": _order_stat(s, "q", k, q=0.75)[0],
-            "max": _order_stat(s, "max", k, winsorize=winsorize)[0],
+            "count": n if n >= policy.min_n else None,
+            "mean": agg(sw.mean()), "std": agg(sw.std()),
+            "min": _order_stat(s, "min", k, winsorize=w, sig_figs=sf)[0],
+            "25%": _order_stat(s, "q", k, q=0.25, sig_figs=sf)[0],
+            "50%": _order_stat(s, "q", k, q=0.50, sig_figs=sf)[0],
+            "75%": _order_stat(s, "q", k, q=0.75, sig_figs=sf)[0],
+            "max": _order_stat(s, "max", k, winsorize=w, sig_figs=sf)[0],
         }
         return Released({"type": "describe", "name": str(self._s.name), "stats": stats},
                         audit={"kind": "table", "verb": "describe", "min_n": k,
@@ -452,13 +548,15 @@ class SafeColumn:
     def _box(self, winsorize):
         from .charts import chart_released
         s = self._numeric()
-        k = self._verbs._policy.min_n
+        k = _descriptive_k(self._verbs._policy)
+        sf = self._verbs._policy.suppression.percentile_sig_figs
+        w = winsorize if winsorize is not None else _winsor_p(self._verbs._policy)
         stats = {
-            "min": _order_stat(s, "min", k, winsorize=winsorize)[0],
-            "q1": _order_stat(s, "q", k, q=0.25)[0],
-            "median": _order_stat(s, "q", k, q=0.50)[0],
-            "q3": _order_stat(s, "q", k, q=0.75)[0],
-            "max": _order_stat(s, "max", k, winsorize=winsorize)[0],
+            "min": _order_stat(s, "min", k, winsorize=w, sig_figs=sf)[0],
+            "q1": _order_stat(s, "q", k, q=0.25, sig_figs=sf)[0],
+            "median": _order_stat(s, "q", k, q=0.50, sig_figs=sf)[0],
+            "q3": _order_stat(s, "q", k, q=0.75, sig_figs=sf)[0],
+            "max": _order_stat(s, "max", k, winsorize=w, sig_figs=sf)[0],
         }
         return chart_released("box", {"type": "box", "name": str(self._s.name), "stats": stats},
                               {"verb": "boxplot", "min_n": k, "winsorized": winsorize,
@@ -474,7 +572,9 @@ class SafeColumn:
 
     def _hist(self, bins, percent):
         from .charts import chart_released
-        s = self._s.dropna()
+        # Tiltak 2: winsorize before binning so extreme values fold into the tail
+        # bins rather than revealing themselves as lone points.
+        s = _winsorized_series(self._s.dropna(), self._verbs._policy)
         k = self._verbs._policy.min_n
         edges = list(bins) if isinstance(bins, (list, tuple)) else _nice_edges(s, int(bins))
         cats = pd.cut(s, bins=edges, include_lowest=True)
@@ -502,6 +602,7 @@ class SafeColumn:
             raise DisclosureError("the 'protect' package is required")
         k = self._verbs._min_n(min_n)
         counts = self._s.value_counts()
+        _stop_if_too_sparse(counts.to_numpy(), self._verbs._policy)
         safe = protect.suppress(counts, counts=counts, min_n=k, round=self._verbs._round(round))
         return Released(series_payload(safe, name=f"count({self._s.name})"), audit={
             "kind": "table", "verb": "value_counts", "min_n": k,
@@ -807,7 +908,9 @@ class SafeFrame:
         return SafeFrame(self._df.rename(columns=columns), self._verbs)
 
     def fillna(self, value) -> "SafeFrame":
-        return SafeFrame(self._df.fillna(value), self._verbs)
+        out = self._df.fillna(value)
+        _check_frame_edit(self._df, out, self._verbs)
+        return SafeFrame(out, self._verbs)
 
     def dropna(self, subset=None) -> "SafeFrame":
         if subset is not None:
@@ -828,6 +931,7 @@ class SafeFrame:
         replace('N/A', None). A value→value relabel, so the frame stays private."""
         _check_recode(to_replace, value)
         out = self._df.replace(to_replace) if value is None else self._df.replace(to_replace, value)
+        _check_frame_edit(self._df, out, self._verbs)
         return SafeFrame(out, self._verbs)
 
     def sort_values(self, by, *, ascending=True) -> "SafeFrame":
@@ -993,8 +1097,11 @@ class SafeFrame:
         cols = (self._df.select_dtypes("number") if numeric_only else self._df)
         if cols.shape[1] == 0:
             raise DisclosureError(f"{stat} needs at least one numeric column")
-        k = self._verbs._policy.min_n
-        rt = self._verbs._policy.round_to
+        policy = self._verbs._policy
+        # counts/distinct use min_n; descriptive stats get the higher floor.
+        k = policy.min_n if stat in ("count", "sum", "nunique") else _descriptive_k(policy)
+        sf = policy.suppression.percentile_sig_figs
+        rt = policy.round_to
         index, values, suppressed = [], [], 0
         for c in cols.columns:
             s = cols[c]
@@ -1003,10 +1110,13 @@ class SafeFrame:
             if n < k:
                 values.append(None); suppressed += 1
                 continue
+            src = _winsorized_series(s, policy) if stat in _WINSOR_STATS else s
             v = s.count() if stat == "count" else (
-                int(s.nunique()) if stat == "nunique" else getattr(s, stat)())
+                int(s.nunique()) if stat == "nunique" else getattr(src, stat)())
             v = _num(v)
-            if rounded and rt is not None and v is not None:
+            if stat == "median" and sf:
+                v = _sig_round(v, sf)
+            elif rounded and rt is not None and v is not None:
                 v = float(round(v / rt) * rt)
             values.append(v)
         return Released({"type": "series", "name": stat, "index": index, "values": values},
@@ -1020,20 +1130,22 @@ class SafeFrame:
         num = self._df.select_dtypes("number")
         if num.shape[1] == 0:
             raise DisclosureError("describe needs at least one numeric column")
-        k = self._verbs._policy.min_n
+        k = _descriptive_k(self._verbs._policy)
+        sf = self._verbs._policy.suppression.percentile_sig_figs
+        kc = self._verbs._policy.min_n
         data = {}
         for c in num.columns:
             s = num[c].dropna()
             n = int(s.shape[0])
-            agg = (lambda f: float(f) if n >= k else None)
+            agg = (lambda f: float(f) if n >= k else None)      # mean/std: not sig-rounded
             data[str(c)] = {
-                "count": n if n >= k else None,
+                "count": n if n >= kc else None,
                 "mean": agg(s.mean()), "std": agg(s.std()),
-                "min": _order_stat(s, "min", k, winsorize=winsorize)[0],
-                "25%": _order_stat(s, "q", k, q=0.25)[0],
-                "50%": _order_stat(s, "q", k, q=0.50)[0],
-                "75%": _order_stat(s, "q", k, q=0.75)[0],
-                "max": _order_stat(s, "max", k, winsorize=winsorize)[0],
+                "min": _order_stat(s, "min", k, winsorize=winsorize, sig_figs=sf)[0],
+                "25%": _order_stat(s, "q", k, q=0.25, sig_figs=sf)[0],
+                "50%": _order_stat(s, "q", k, q=0.50, sig_figs=sf)[0],
+                "75%": _order_stat(s, "q", k, q=0.75, sig_figs=sf)[0],
+                "max": _order_stat(s, "max", k, winsorize=winsorize, sig_figs=sf)[0],
             }
         tab = pd.DataFrame(data).reindex(
             ["count", "mean", "std", "min", "25%", "50%", "75%", "max"])

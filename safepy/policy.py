@@ -18,7 +18,7 @@ as a value, not a comment.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 
@@ -51,32 +51,86 @@ _ORDER = {ProtectionLevel.PUBLIC: 0,
 
 
 @dataclass(frozen=True)
+class Suppression:
+    """The tunable secondary-disclosure controls (the microdata.no "Tiltak").
+
+    Every field is a lever; ``None``/``False`` means the measure is off. Presets
+    below bundle them into named tiers, and any single field can be overridden
+    per run. The load-bearing primary control (``min_n`` cell suppression) and
+    the count rounding base live here too, so there is one config object.
+    """
+    min_n: int = 5                          # primary cell threshold
+    round_to: int | None = None             # rounding base for released counts
+    min_population: int | None = None       # Tiltak 1: min analysis population
+    winsorize: tuple | None = None          # Tiltak 2: (low, high) percentiles
+    count_noise: float | str | None = None  # Tiltak 3: noise on counts (batch 2)
+    max_low_cell_share: float | None = None # Tiltak 5: stop table if exceeded
+    min_edit_units: int | None = None       # Tiltak 6: min units an edit may touch
+    min_descriptive_n: int | None = None    # Tiltak 7: min pop for mean/std/pctile
+    percentile_sig_figs: int | None = None  # Tiltak 8: round pctiles to N sig figs
+    intercept_k_anon: int | None = None     # Tiltak 9: hide intercept (batch 3)
+    microaggregate: bool = False            # Tiltak 10: micro-agg pctiles (batch 3)
+
+
+# Named aggressiveness tiers. `standard` turns on the measures implemented so far;
+# `microdata` mirrors microdata.no (adds the 1000-person floor; noise and
+# micro-aggregation are wired in later batches).
+PRESETS: dict[str, Suppression] = {
+    "off":      Suppression(min_n=1),
+    "light":    Suppression(min_n=5, round_to=None),
+    "standard": Suppression(
+        min_n=5, round_to=10, winsorize=(0.01, 0.99), max_low_cell_share=0.5,
+        min_edit_units=10, min_descriptive_n=10, percentile_sig_figs=3,
+        intercept_k_anon=5),
+    "microdata": Suppression(
+        min_n=5, round_to=10, min_population=1000, winsorize=(0.01, 0.99),
+        max_low_cell_share=0.5, min_edit_units=10, min_descriptive_n=10,
+        percentile_sig_figs=3, intercept_k_anon=5),
+}
+
+# Which tier each protection level gets by default.
+_LEVEL_PRESET = {ProtectionLevel.PUBLIC: "off",
+                 ProtectionLevel.PROTECTED: "standard",
+                 ProtectionLevel.SENSITIVE: "microdata"}
+
+
+@dataclass(frozen=True)
 class Policy:
     level: ProtectionLevel
     auth_required: bool
     log: bool
-    min_n: int               # primary suppression threshold (cells with n<min_n blanked)
-    round_to: int | None     # rounding base for released counts, or None
+    min_n: int               # mirror of suppression.min_n (kept for direct access)
+    round_to: int | None     # mirror of suppression.round_to
     profile: Profile          # which executor (OPEN sandbox vs STRICT capability)
+    suppression: Suppression  # the full secondary-control config
 
 
-def resolve_policy(levels: list[ProtectionLevel | str]) -> Policy:
+def resolve_policy(levels: list[ProtectionLevel | str], *,
+                   suppression: Suppression | str | None = None) -> Policy:
     """Most-restrictive-source-wins resolution to one policy.
 
     Profile follows the level: public gets the OPEN sandbox; protected and
-    sensitive get the STRICT capability executor. A caller may override the
-    profile explicitly (see ``api.run``) for development/testing.
+    sensitive get the STRICT capability executor. ``suppression`` overrides the
+    tier — pass a preset name (``"light"``/``"standard"``/``"microdata"``) or a
+    :class:`Suppression` instance to tune aggressiveness. A caller may also
+    override the profile explicitly (see ``api.run``).
     """
     if not levels:
         levels = [ProtectionLevel.PROTECTED]
     norm = [ProtectionLevel(l) for l in levels]
     level = max(norm, key=lambda l: _ORDER[l])
 
-    if level is ProtectionLevel.PUBLIC:
-        return Policy(level, auth_required=False, log=False,
-                      min_n=1, round_to=None, profile=Profile.OPEN)
-    if level is ProtectionLevel.PROTECTED:
-        return Policy(level, auth_required=True, log=True,
-                      min_n=5, round_to=None, profile=Profile.OPEN)
-    return Policy(level, auth_required=True, log=True,
-                  min_n=5, round_to=10, profile=Profile.STRICT)
+    if suppression is None:
+        supp = PRESETS[_LEVEL_PRESET[level]]
+    elif isinstance(suppression, str):
+        if suppression not in PRESETS:
+            raise ValueError(f"unknown suppression preset: {suppression!r}")
+        supp = PRESETS[suppression]
+    else:
+        supp = suppression
+
+    profile = Profile.OPEN if level in (ProtectionLevel.PUBLIC, ProtectionLevel.PROTECTED) \
+        else Profile.STRICT
+    auth = level is not ProtectionLevel.PUBLIC
+    return Policy(level, auth_required=auth, log=auth, min_n=supp.min_n,
+                  round_to=supp.round_to, profile=profile, suppression=supp)

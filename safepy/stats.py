@@ -762,26 +762,36 @@ class StatsMixin:
     # ---- grouped describe --------------------------------------------------
 
     def group_describe(self, df, by, value):
-        from .safeframe import _order_stat  # lazy: avoids an import cycle
+        from .safeframe import (_order_stat, _descriptive_k, _winsor_p,
+                                 _winsorized_series)  # lazy: import cycle
         df = _unwrap(df)
         _validate_idents(value)
         if value not in df.columns:
             raise DisclosureError(f"unknown column: {value}")
         self._numeric_col(df, value)
-        k = self._policy.min_n
+        kc = self._policy.min_n
+        k = _descriptive_k(self._policy)
+        sf = self._policy.suppression.percentile_sig_figs
+        w = _winsor_p(self._policy)                      # Tiltak 2 default for min/max
         cols = ["count", "mean", "std", "min", "25%", "50%", "75%", "max"]
         index, data = [], []
         for gname, sub in df.dropna(subset=[value]).groupby(by, observed=True):
             s = sub[value]
             index.append(str(gname))
-            if len(s) < k:
+            if len(s) < kc:
                 data.append([None] * len(cols))  # whole group suppressed
                 continue
+            desc_ok = len(s) >= k
+            sw = _winsorized_series(s, self._policy)      # mean/std on winsorized group
             data.append([
-                len(s), _num(s.mean()), _num(s.std()),
-                _order_stat(s, "min", k)[0], _order_stat(s, "q", k, q=0.25)[0],
-                _order_stat(s, "q", k, q=0.50)[0], _order_stat(s, "q", k, q=0.75)[0],
-                _order_stat(s, "max", k)[0],
+                len(s),
+                _num(sw.mean()) if desc_ok else None,
+                _num(sw.std()) if desc_ok else None,
+                _order_stat(s, "min", k, winsorize=w, sig_figs=sf)[0],
+                _order_stat(s, "q", k, q=0.25, sig_figs=sf)[0],
+                _order_stat(s, "q", k, q=0.50, sig_figs=sf)[0],
+                _order_stat(s, "q", k, q=0.75, sig_figs=sf)[0],
+                _order_stat(s, "max", k, winsorize=w, sig_figs=sf)[0],
             ])
         return Released({"type": "frame", "columns": cols, "index": index, "data": data},
                         audit={"kind": "table", "verb": "group_describe", "min_n": k,

@@ -85,7 +85,9 @@ def test_np_unary_expansion():
 
 
 def test_np_round_negative_decimals():
-    r = _strict("df.assign(r=np.round(df['salary'], -3)).value_counts('r')")
+    # release via a coarse groupby (value_counts of ~60 rounded bins would be
+    # stopped by the sparse-table measure, which is not what this tests)
+    r = _strict("df.assign(r=np.round(df['salary'], -3)).groupby('sex')['r'].mean()")
     assert r.ok
 
 

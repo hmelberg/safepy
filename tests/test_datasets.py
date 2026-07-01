@@ -90,6 +90,6 @@ def test_catalog_present_even_on_refused_result():
 def test_missing_counts_suppressed_when_small():
     d = DF.copy()
     d.loc[d.index[:3], "salary"] = np.nan     # 3 missing (< min_n)
-    r = run("df['id'].value_counts()", {"df": d}, profile=Profile.STRICT)
+    r = run("df['salary'].count()", {"df": d}, profile=Profile.STRICT)
     sal = next(c for c in r.catalog[0]["columns"] if c["name"] == "salary")
     assert sal["n_missing"] is None           # small nonzero missing count suppressed
