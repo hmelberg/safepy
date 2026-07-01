@@ -72,7 +72,8 @@ def _native_pivot_table(pl_df, values: str, i0: str, c0: str, aggfunc: str):
     polars (``group_by(i0, c0).agg`` then pivot), returning aligned pandas
     DataFrames with sorted axes — matching pandas ``pivot_table`` byte-for-byte
     (verified numerically). Single index column, single pivot column."""
-    frame = _eager(pl_df)
+    # drop null index/pivot keys to match pandas pivot_table (value nulls kept).
+    frame = _eager(pl_df).drop_nulls([i0, c0])
     vexpr = pl.len() if aggfunc == "size" else getattr(pl.col(values), aggfunc)()
     grp = frame.group_by(i0, c0).agg(vexpr.alias("__v"), pl.col(values).count().alias("__n"))
     tab = grp.pivot(on=c0, index=i0, values="__v").to_pandas().set_index(i0)
@@ -117,6 +118,9 @@ def _native_group_agg(pl_df: pl.DataFrame, by: list, value: str, agg: str, polic
     returning them as pandas Series (small — one row per group) sharing a group
     index, ready for the backend-neutral ``SafeVerbs._release_group_agg``. Only the
     aggregate crosses to pandas; the private per-row frame stays in polars."""
+    # drop rows with a null group key so we match pandas groupby(observed=True),
+    # which excludes them — a lone null-key group would be an unpaired small cell.
+    pl_df = pl_df.drop_nulls(by)
     counts = (_eager(pl_df.group_by(by).agg(pl.len().alias("__n")))
               .to_pandas().set_index(by)["__n"])
     if agg == "size":

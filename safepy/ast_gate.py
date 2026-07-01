@@ -70,12 +70,16 @@ _DENIED_METHODS: frozenset = frozenset({
     "values", "array", "item", "info", "memory_usage", "glimpse", "row",
     "rows", "get_column", "get_columns", "write_csv", "write_parquet",
     # polars raw-export surface (never used by the safe facades) ---
-    "to_pandas", "to_arrow", "to_series", "to_struct", "to_init_repr",
+    "to_pandas", "to_arrow", "to_series", "to_struct", "to_init_repr", "to_dicts",
+    "to_physical", "get_columns", "iter_rows", "iter_columns", "iter_slices",
     # polars value-ordered / row-identity expression methods (same class as
     # pandas nlargest/idxmax/rank; absent from the pandas surface, so free to
     # deny). '.over()' is NOT here — it is group-broadcast, like transform.
     "gather", "top_k", "bottom_k", "arg_max", "arg_min", "arg_sort",
     "search_sorted", "sort",
+    # polars aggregate-all-rows (list-ification) and per-row callable escapes ---
+    "implode", "map_elements", "map_batches", "map_dict", "map_rows",
+    "partition_by", "reshape",
     # --- positional / row-identifying reducers: return individual rows ---
     # (max/min/quantile/describe are NOT here: SafeColumn provides safe,
     # order-statistic-checked versions; on a raw frame/OPEN the mediator still

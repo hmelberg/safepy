@@ -81,10 +81,19 @@ each released through a backend-neutral core factored out of `safe.py`/`safefram
 All verified byte-equal to pandas incl. the microdata count-noise tier, work on
 lazy sources, and record `backend="polars"`. Removed from `_DELEGATED_VERBS`.
 
+**Security hardening (red-team).** `tests/attacks/test_attacks_polars.py` (49
+vectors) exercises the polars STRICT surface: frame row-dumps/raw exports,
+expression-level extremes/order-stats/list-ification, aggregate-of-all-rows,
+code-execution escapes, and dangling intermediates — all blocked (facade-as-boundary
+holds; no leaks found). Defense-in-depth: the gate denylist now also covers the
+polars escape names (`to_dicts`/`to_physical`/`iter_rows`/`map_elements`/
+`map_batches`/`map_rows`/`implode`/`partition_by`/…). **Null group-key parity
+fixed:** native `group_by`/`pivot_table` drop null keys to match pandas
+`groupby(observed=True)`, so no lone null-key small cell can appear.
+
 **Not yet:** native whole-column scalar reducers (`select(reducer)` still converts
-one column via `SafeColumn`); multi-index/-column `pivot_table` native (currently
-the pandas fallback); null group-key parity (polars keeps null-key groups; pandas
-`groupby(observed=True)` drops them); query-plan introspection off the LazyFrame plan.
+one column via `SafeColumn`); multi-index/-column `pivot_table` native (pandas
+fallback); query-plan introspection off the LazyFrame plan.
 
 ## The two axes (keep them separate)
 

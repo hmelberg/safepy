@@ -67,6 +67,18 @@ def test_group_agg_uses_native_polars_backend():
     assert r.ok and r.audit.get("backend") == "polars"
 
 
+def test_null_group_key_matches_pandas():
+    # a null in the grouping key: pandas groupby(observed=True) drops it; native
+    # polars must match — a lone null-key group would be a small-cell leak.
+    pdf = salaries().copy()
+    pdf.loc[pdf.index[:3], "sex"] = None            # 3 rows with a null key
+    p = run("df.groupby('sex')['salary'].count()", {"df": pdf}, profile=Profile.STRICT)
+    q = run("import polars as pl\ndf.group_by('sex').agg(pl.col('salary').count())",
+            {"df": pl.from_pandas(pdf)}, profile=Profile.STRICT, dialect="polars")
+    assert q.ok and _as_dict(q.payload) == _as_dict(p.payload)
+    assert not any(k in ("nan", "null", "None") for k in _as_dict(q.payload))
+
+
 def test_group_by_len_uses_native_polars_backend():
     r = _polars("df.group_by('region').len()")
     assert r.ok and r.audit.get("backend") == "polars"
@@ -267,6 +279,16 @@ def test_pivot_table_native_matches_pandas(aggfunc):
     q = _polars(f"df.pivot_table({spec})")
     assert q.ok and q.audit.get("backend") == "polars"
     assert _celldict(q.payload) == _celldict(p.payload)
+
+
+def test_pivot_table_null_key_matches_pandas():
+    pdf = salaries().copy()
+    pdf.loc[pdf.index[:3], "sex"] = None
+    spec = "values='salary', index='sex', columns='region', aggfunc='count'"
+    p = run(f"df.pivot_table({spec})", {"df": pdf}, profile=Profile.STRICT)
+    q = run(f"df.pivot_table({spec})", {"df": pl.from_pandas(pdf)},
+            profile=Profile.STRICT, dialect="polars")
+    assert q.ok and _celldict(q.payload) == _celldict(p.payload)
 
 
 def test_pivot_table_microdata_tier():
