@@ -29,7 +29,7 @@ import ast
 import numpy as np
 import pandas as pd
 
-from ._payload import series_payload
+from ._payload import frame_payload, series_payload
 from .errors import DisclosureError
 from .result import Released
 from .safe import SafeVerbs
@@ -323,6 +323,31 @@ class SafeFrame:
         mask = _CMP_OPS[op](self._df[col], value)
         return SafeFrame(self._df[mask], self._verbs)
 
+    def rename(self, columns: dict) -> "SafeFrame":
+        if not isinstance(columns, dict):
+            raise DisclosureError("rename needs columns={old: new}")
+        for c in columns:
+            if c not in self._df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        return SafeFrame(self._df.rename(columns=columns), self._verbs)
+
+    def fillna(self, value) -> "SafeFrame":
+        return SafeFrame(self._df.fillna(value), self._verbs)
+
+    def dropna(self, subset=None) -> "SafeFrame":
+        if subset is not None:
+            for c in subset:
+                if c not in self._df.columns:
+                    raise DisclosureError(f"unknown column: {c}")
+        return SafeFrame(self._df.dropna(subset=subset), self._verbs)
+
+    def drop(self, columns) -> "SafeFrame":
+        cols = [columns] if isinstance(columns, str) else list(columns)
+        for c in cols:
+            if c not in self._df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        return SafeFrame(self._df.drop(columns=cols), self._verbs)
+
     def assign(self, *args, **kwargs) -> "SafeFrame":
         """Add derived columns. Two forms:
 
@@ -347,6 +372,19 @@ class SafeFrame:
 
     def crosstab(self, row: str, col: str, **kw) -> Released:
         return self._verbs.crosstab(self._df, row, col, **kw)
+
+    def corr(self, **kw) -> Released:
+        """Correlation matrix over numeric columns (aggregate; released only if
+        the frame has at least ``min_n`` rows)."""
+        num = self._df.select_dtypes("number")
+        if num.shape[1] < 2:
+            raise DisclosureError("corr needs at least two numeric columns")
+        k = self._verbs._policy.min_n
+        if len(self._df) < k:
+            raise DisclosureError("too few rows to release a correlation matrix")
+        c = num.corr().round(3)
+        return Released(frame_payload(c), audit={
+            "kind": "table", "verb": "corr", "min_n": k, "backend": "pandas"})
 
     # -- regression / survival: delegate to the safe-verb library --
     def ols(self, *, y, x, **kw) -> Released:

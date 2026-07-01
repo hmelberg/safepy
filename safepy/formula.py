@@ -75,7 +75,12 @@ def parse_formula(formula: str, columns) -> tuple[str, str, list[str]]:
         if t in ("0",):
             has_intercept = False
             continue
-        if ":" in t:
+        if "*" in t:
+            # a*b  ->  a + b + a:b  (main effects plus their interaction)
+            factors = [_factor(p, columns, base) for p in t.split("*")]
+            terms.extend(factors)
+            terms.append(":".join(factors))
+        elif ":" in t:
             factors = [_factor(p, columns, base) for p in t.split(":")]
             terms.append(":".join(factors))
         else:

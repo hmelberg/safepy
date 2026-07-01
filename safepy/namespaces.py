@@ -34,6 +34,12 @@ def _arr(v):
 class SafeNp:
     """A whitelist of element-wise numpy functions over SafeColumns."""
 
+    # constants commonly used in bins/expressions
+    inf = np.inf
+    nan = np.nan
+    pi = np.pi
+    e = np.e
+
     def _u(self, x, fn):
         if isinstance(x, SafeColumn):
             return SafeColumn(fn(x._s), x._verbs)
@@ -69,6 +75,11 @@ class SafePd:
         if not isinstance(x, SafeColumn):
             raise DisclosureError("pd.to_datetime needs a column")
         return SafeColumn(pd.to_datetime(x._s, **kw), x._verbs)
+
+    def to_numeric(self, x, **kw):
+        if not isinstance(x, SafeColumn):
+            raise DisclosureError("pd.to_numeric needs a column")
+        return SafeColumn(pd.to_numeric(x._s, **kw), x._verbs)
 
     def cut(self, x, bins, *, labels=None, right=True):
         if not isinstance(x, SafeColumn):
