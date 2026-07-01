@@ -451,6 +451,96 @@ class StatsMixin:
         ps = pd.Series(np.asarray(model.predict(X)), index=df.index, name="propensity")
         return SafeColumn(ps, self)
 
+    # ---- synthetic control (pysyncon) --------------------------------------
+
+    def synthetic_control(self, df, *, unit, time, outcome, treated_unit,
+                          treatment_time, predictors=None, controls=None,
+                          unit_size=None, max_weight=0.5):
+        """Synthetic control. The donor weights and the synthetic series are
+        *private intermediates* (never returned). Releases only the aggregate
+        effect path (gap = treated - synthetic per period), the ATT, pre-period
+        RMSPE, and concentration diagnostics.
+
+        Exit guard (a concentrated synthetic reconstructs a donor through the
+        released gap): if ``unit_size`` is given, every treated/donor unit must
+        aggregate >= min_n individuals; otherwise the effective number of donors
+        must be >= min_n and no single weight may exceed ``max_weight``.
+        """
+        import contextlib
+        import io
+
+        from pysyncon import Dataprep, Synth
+
+        df = _unwrap(df)
+        preds = [] if predictors is None else (
+            [predictors] if isinstance(predictors, str) else list(predictors))
+        extra = [unit_size] if unit_size else []
+        _validate_idents(unit, time, outcome, *preds, *extra)
+        for c in [unit, time, outcome, *preds, *extra]:
+            if c not in df.columns:
+                raise DisclosureError(f"unknown column: {c}")
+        k = self._policy.min_n
+
+        all_units = df[unit].unique().tolist()
+        if treated_unit not in all_units:
+            raise DisclosureError("treated_unit not found in the unit column")
+        ctrl = ([u for u in all_units if u != treated_unit] if controls is None
+                else [u for u in controls if u != treated_unit])
+        if len(ctrl) < 2:
+            raise DisclosureError("need at least 2 control units")
+
+        times = sorted(df[time].unique().tolist())
+        pre = [t for t in times if t < treatment_time]
+        post = [t for t in times if t >= treatment_time]
+        if len(pre) < 3:
+            raise DisclosureError("need at least 3 pre-treatment periods")
+        if not post:
+            raise DisclosureError("no post-treatment periods")
+
+        dp = Dataprep(foo=df, predictors=preds or [outcome], predictors_op="mean",
+                      dependent=outcome, unit_variable=unit, time_variable=time,
+                      treatment_identifier=treated_unit, controls_identifier=ctrl,
+                      time_predictors_prior=pre, time_optimize_ssr=pre)
+        synth = Synth()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            synth.fit(dataprep=dp)
+        w = synth.weights()  # PRIVATE — never released
+        eff_donors = float(1.0 / float((w ** 2).sum()))
+        top = float(w.max())
+
+        # --- exit guard ---
+        used = [u for u in w.index if float(w[u]) > 1e-4]
+        if unit_size is not None:
+            sizes = df.groupby(unit)[unit_size].min()
+            small = [u for u in [treated_unit, *used] if int(sizes.get(u, 0)) < k]
+            if small:
+                raise DisclosureError(
+                    "a treated/donor unit aggregates fewer than min_n individuals")
+        elif eff_donors < k or top > max_weight:
+            raise DisclosureError(
+                "the synthetic control is too concentrated to release safely "
+                f"(effective donors {eff_donors:.1f} < {k} or top weight "
+                f"{top:.2f} > {max_weight}); provide unit_size to certify "
+                "aggregate units, or add controls")
+
+        # --- effect path from the (private) weights + raw panel ---
+        cmat = df[df[unit].isin(ctrl)].pivot(index=time, columns=unit, values=outcome)
+        synth_path = cmat[w.index] @ w.values
+        treated = df[df[unit] == treated_unit].set_index(time)[outcome]
+        gap = (treated - synth_path).reindex(times)
+        att = float(gap.loc[post].mean())
+        rmspe_pre = float(np.sqrt((gap.loc[pre] ** 2).mean()))
+
+        return Released(
+            {"type": "synthetic_control", "treated_unit": str(treated_unit),
+             "treatment_time": _num(treatment_time), "att": _num(att),
+             "rmspe_pre": _num(rmspe_pre), "effective_donors": _num(eff_donors),
+             "max_weight": _num(top), "n_controls": len(ctrl),
+             "effect_path": {"time": [_num(t) for t in times],
+                             "gap": [_num(gap.get(t)) for t in times]}},
+            audit={"kind": "causal", "verb": "synthetic_control", "min_n": k,
+                   "unit_size_checked": unit_size is not None, "backend": "pysyncon"})
+
     # ---- restricted mean survival time (lifelines) -------------------------
 
     def rmst(self, df, *, duration, event, t, by=None):

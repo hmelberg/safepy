@@ -1,8 +1,11 @@
-# Deferred: synthetic control (and interrupted time series)
+# Synthetic control (and interrupted time series)
 
-**Status:** noted, not implemented. Revisit when panel/aggregate-unit data is a
-priority. CausalPy is deferred because it pulls **PyMC** (heavy) and is
-formula-based; lighter options exist (below).
+**Status:** phase 1 **implemented** as `df.synthetic_control(...)` on the
+**pysyncon** backend (`safepy/stats.py`) — the private-intermediate design below,
+with the concentration / `unit_size` exit guards. Weights and the synthetic
+series are never returned. **Phase 2 (deferred):** placebo/permutation inference
+(p-value) and the Aug/Robust/Penalized variants pysyncon already provides.
+Interrupted time series (CausalPy, heavy/PyMC) remains deferred.
 
 ## The disclosure concern is specific to SC: donor weights
 

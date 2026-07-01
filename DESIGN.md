@@ -260,11 +260,16 @@ pattern:
 - **Refutation (`df.refute_ate`)** — re-estimate under a placebo treatment / a
   random common cause / a data subset; releases the original vs refuted effect +
   p-value (all aggregate).
-- **Deferred:** *synthetic control* / interrupted time series — donor weights are
-  the disclosure risk (a concentrated weight reveals a unit). CausalPy is heavy
-  (PyMC); lighter options (pysyncon, synthdid, scpi, or a thin in-house QP) and
-  the safe design are noted in
+- **Synthetic control (`df.synthetic_control`, pysyncon)** — phase 1 done. The
+  donor weights and synthetic series are *private intermediates* (never
+  returned); releases only the effect path (gap per period), ATT, pre-period
+  RMSPE, and concentration diagnostics (effective donors / max weight). Exit
+  guard: with `unit_size`, every treated/donor unit must aggregate >= min_n
+  individuals; otherwise effective donors >= min_n and no weight > `max_weight`.
+  A curated verb (like `ate`), not an import facade. Phase 2 (deferred): placebo
+  inference + Aug/Robust/Penalized variants. Design notes in
   [docs/deferred-synthetic-control.md](docs/deferred-synthetic-control.md).
+- **Deferred:** interrupted time series (CausalPy).
 
 ## Non-goals (handled elsewhere)
 

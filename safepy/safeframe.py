@@ -604,6 +604,13 @@ class SafeFrame:
         return self._verbs.propensity(self._df, treatment=treatment,
                                       confounders=confounders, **kw)
 
+    def synthetic_control(self, *, unit, time, outcome, treated_unit, treatment_time,
+                          predictors=None, controls=None, unit_size=None, **kw) -> Released:
+        return self._verbs.synthetic_control(
+            self._df, unit=unit, time=time, outcome=outcome, treated_unit=treated_unit,
+            treatment_time=treatment_time, predictors=predictors, controls=controls,
+            unit_size=unit_size, **kw)
+
     def __len__(self):
         raise DisclosureError("len() on a frame is not allowed; use a count aggregation")
 
