@@ -32,14 +32,34 @@ _SAFE_BUILTINS = {
 }
 
 
-def execute(code: str, namespace: dict):
+def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    """A controlled ``__import__`` resolving a whitelist of module names to safe
+    facades and rejecting everything else. Reachable only via the import
+    statement machinery (calling ``__import__`` directly is dunder-banned)."""
+    root = name.split(".")[0]
+    if root == "lifelines":
+        from .lifelines_api import SafeLifelinesModule
+        return SafeLifelinesModule()
+    if root == "numpy":
+        from .namespaces import SafeNp
+        return SafeNp()
+    if root == "pandas":
+        from .namespaces import SafePd
+        return SafePd()
+    raise ImportError(f"module '{name}' is not available in safepy")
+
+
+def execute(code: str, namespace: dict, *, allow_imports: bool = False):
     """Run gated ``code`` in ``namespace`` and return the final expression's value.
 
     ``namespace`` should contain the library handles (``pd``, ``np``, ...) and
     the data sources. ``__builtins__`` is overwritten here.
     """
     ns = dict(namespace)
-    ns["__builtins__"] = _SAFE_BUILTINS
+    builtins = dict(_SAFE_BUILTINS)
+    if allow_imports:
+        builtins["__import__"] = _safe_import
+    ns["__builtins__"] = builtins
 
     tree = ast.parse(code, mode="exec")
     *prefix, last = tree.body  # gate guarantees last is an ast.Expr

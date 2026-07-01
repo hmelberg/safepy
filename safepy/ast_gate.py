@@ -45,7 +45,12 @@ _ALLOWED_NODES: frozenset = frozenset({
     ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift,
     ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
     ast.Is, ast.IsNot, ast.In, ast.NotIn,
+    ast.Import, ast.ImportFrom, ast.alias,
 })
+
+# Modules that may be imported (only when allow_imports; they resolve to safe
+# facades in the runtime, never the real modules).
+_IMPORT_WHITELIST: frozenset = frozenset({"lifelines", "numpy", "pandas"})
 
 # --- bare-name calls allowed (everything else must be lib.method(...)) -------
 _SAFE_BUILTINS: frozenset = frozenset({
@@ -103,9 +108,11 @@ class _Stop(Exception):
 
 
 class _Validator(ast.NodeVisitor):
-    def __init__(self, allowed_names: frozenset[str]):
+    def __init__(self, allowed_names: frozenset[str], allow_imports: bool = False):
         self.allowed_names = allowed_names
+        self.allow_imports = allow_imports
         self.assigned: list[str] = []
+        self.imported: set[str] = set()
         self.calls: list[str] = []
         self.error: ValidationError | None = None
 
@@ -126,17 +133,16 @@ class _Validator(ast.NodeVisitor):
     def visit_Module(self, node: ast.Module):
         if not node.body:
             self._fail(node, "empty", "empty program")
-        for i, stmt in enumerate(node.body):
-            is_last = i == len(node.body) - 1
+        for stmt in node.body:
             if isinstance(stmt, ast.Assign):
                 self._check_assign(stmt)
+            elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                pass  # validated in visit_Import / visit_ImportFrom
             elif isinstance(stmt, ast.Expr):
-                if not is_last:
-                    # a non-final bare expression is a no-op or a side-effect
-                    # attempt; disallow so the "result = last expression" rule
-                    # is unambiguous.
-                    self._fail(stmt, "structure",
-                               "only the final statement may be a bare expression")
+                # An intermediate bare expression (e.g. `cph.fit(...)`) has its
+                # value discarded, like normal Python; only the final expression
+                # becomes the mediated result. Harmless for disclosure.
+                pass
             else:
                 self._fail(stmt, "structure",
                            f"top-level {type(stmt).__name__} is not allowed; "
@@ -180,7 +186,8 @@ class _Validator(ast.NodeVisitor):
             if func.id in _DENIED_NAMES:
                 self._fail(node, "call",
                            f"calling '{func.id}' is not allowed", token=func.id)
-            if func.id not in _SAFE_BUILTINS and func.id not in self.allowed_names:
+            if (func.id not in _SAFE_BUILTINS and func.id not in self.allowed_names
+                    and func.id not in self.imported):
                 self._fail(node, "call",
                            f"unknown function '{func.id}'; only library handles "
                            f"and {sorted(_SAFE_BUILTINS)} may be called by name",
@@ -189,6 +196,30 @@ class _Validator(ast.NodeVisitor):
             self.calls.append(func.attr)  # _DENIED_METHODS already enforced in visit_Attribute
         else:
             self._fail(node, "call", "only name(...) and obj.method(...) calls are allowed")
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import):
+        if not self.allow_imports:
+            self._fail(node, "import", "imports are not allowed here")
+        for alias in node.names:
+            root = alias.name.split(".")[0]
+            if root not in _IMPORT_WHITELIST:
+                self._fail(node, "import",
+                           f"module '{alias.name}' is not available in safepy",
+                           token=alias.name)
+            self.imported.add(alias.asname or root)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom):
+        if not self.allow_imports:
+            self._fail(node, "import", "imports are not allowed here")
+        root = (node.module or "").split(".")[0]
+        if root not in _IMPORT_WHITELIST:
+            self._fail(node, "import",
+                       f"module '{node.module}' is not available in safepy",
+                       token=node.module)
+        for alias in node.names:
+            self.imported.add(alias.asname or alias.name)
         self.generic_visit(node)
 
     def visit_Subscript(self, node: ast.Subscript):
@@ -203,7 +234,8 @@ class _Validator(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def validate(code: str, *, allowed_names: frozenset[str]) -> GateResult:
+def validate(code: str, *, allowed_names: frozenset[str],
+             allow_imports: bool = False) -> GateResult:
     """Static-check ``code``. Returns a GateResult; never executes anything."""
     try:
         tree = ast.parse(code, mode="exec")
@@ -211,7 +243,7 @@ def validate(code: str, *, allowed_names: frozenset[str]) -> GateResult:
         return GateResult(False, [], [],
                           ValidationError(f"could not parse: {exc.msg}",
                                           kind="parse", line=exc.lineno))
-    v = _Validator(allowed_names)
+    v = _Validator(allowed_names, allow_imports=allow_imports)
     try:
         v.visit(tree)
     except _Stop:

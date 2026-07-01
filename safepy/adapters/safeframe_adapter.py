@@ -15,11 +15,12 @@ from ..errors import DisclosureError
 from ..policy import Policy
 from ..result import SafeResult
 from ..formula_api import SafeModel, SafeResults
+from ..lifelines_api import FITTERS
 from ..safeframe import SafeColumn, SafeFrame, SafeGroupBy, SafeSeriesGroupBy
 from . import base
 
 _INTERMEDIATES = (SafeFrame, SafeColumn, SafeGroupBy, SafeSeriesGroupBy,
-                  SafeModel, SafeResults)
+                  SafeModel, SafeResults, *FITTERS)
 
 
 class SafeFrameAdapter:

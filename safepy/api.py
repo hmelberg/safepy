@@ -61,12 +61,15 @@ def run(code: str,
     try:
         namespace = _build_namespace(active, policy, sources)
         allowed_names = frozenset(namespace)
-        gate = validate(code, allowed_names=allowed_names)
+        # Whitelisted imports (resolving to safe facades) are allowed only in the
+        # STRICT capability profile.
+        imports_ok = active is Profile.STRICT
+        gate = validate(code, allowed_names=allowed_names, allow_imports=imports_ok)
         if not gate.ok:
             assert gate.error is not None
             return SafeResult(ok=False, kind="error", error=gate.error.as_dict())
 
-        value = execute(code, namespace)
+        value = execute(code, namespace, allow_imports=imports_ok)
 
         result = mediate(value, policy)
         result.audit.setdefault("level", policy.level.value)
