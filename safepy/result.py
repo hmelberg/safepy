@@ -37,7 +37,8 @@ class SafeResult:
     payload: Any = None
     audit: dict = field(default_factory=dict)
     error: dict | None = None
+    catalog: list | None = None     # schema of datasets left in the session (no data)
 
     def as_dict(self) -> dict:
-        return {"ok": self.ok, "kind": self.kind,
-                "payload": self.payload, "audit": self.audit, "error": self.error}
+        return {"ok": self.ok, "kind": self.kind, "payload": self.payload,
+                "audit": self.audit, "error": self.error, "catalog": self.catalog}

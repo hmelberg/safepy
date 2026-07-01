@@ -57,6 +57,7 @@ def run(code: str,
     """
     policy: Policy = resolve_policy([level])
     active = Profile(profile) if profile is not None else policy.profile
+    catalog = None  # datasets left in the session (populated once execution runs)
 
     try:
         namespace = _build_namespace(active, policy, sources)
@@ -69,7 +70,8 @@ def run(code: str,
             assert gate.error is not None
             return SafeResult(ok=False, kind="error", error=gate.error.as_dict())
 
-        value = execute(code, namespace, allow_imports=imports_ok)
+        value, ns = execute(code, namespace, allow_imports=imports_ok)
+        catalog = _build_catalog(ns, policy)
 
         result = mediate(value, policy)
         result.audit.setdefault("level", policy.level.value)
@@ -79,13 +81,41 @@ def run(code: str,
             from .charts import render_chart
             result.payload = render_chart(result.payload, render)
             result.audit["render"] = render
+        result.catalog = catalog
         return result
 
     except ValidationError as exc:
-        return SafeResult(ok=False, kind="error", error=exc.as_dict())
+        return SafeResult(ok=False, kind="error", error=exc.as_dict(), catalog=catalog)
     except (DisclosureError, SandboxError) as exc:
-        return SafeResult(ok=False, kind="error",
+        return SafeResult(ok=False, kind="error", catalog=catalog,
                           error={"kind": type(exc).__name__, "message": str(exc)})
     except SafePythonError as exc:  # pragma: no cover - catch-all, still no data leak
-        return SafeResult(ok=False, kind="error",
+        return SafeResult(ok=False, kind="error", catalog=catalog,
                           error={"kind": "SafePythonError", "message": str(exc)})
+
+
+def _build_catalog(ns: dict, policy: Policy) -> list:
+    """A schema-only catalog of every SafeFrame bound in the session: names,
+    columns, dtypes, and suppressed counts (n_rows / n_missing). Never values."""
+    from .safeframe import SafeFrame
+
+    k, rt = policy.min_n, policy.round_to
+
+    def count(n: int):
+        n = int(n)
+        if n == 0:
+            return 0                      # "no missing" is not disclosive
+        if n < k:
+            return None                   # a small nonzero count is suppressed
+        return int(round(n / rt) * rt) if rt else n
+
+    catalog = []
+    for name, val in ns.items():
+        if name.startswith("_") or not isinstance(val, SafeFrame):
+            continue
+        d = val._df
+        columns = [{"name": str(c), "dtype": str(d[c].dtype),
+                    "n_missing": count(d[c].isna().sum())} for c in d.columns]
+        catalog.append({"name": name, "n_rows": count(len(d)),
+                        "n_columns": len(d.columns), "columns": columns})
+    return catalog

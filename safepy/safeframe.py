@@ -57,6 +57,9 @@ _CMP_OPS = {
 }
 # whole-column reducers that are safe given a minimum contributing count
 _SAFE_REDUCERS = frozenset({"mean", "sum", "count", "median", "std", "var"})
+# aggregations allowed when *building a derived dataset* via summarise (extremes
+# excluded — the derived frame is private, but this keeps derived columns tame)
+_SUMMARISE_FUNCS = frozenset({"mean", "sum", "count", "size", "median", "std", "var"})
 
 
 def _compile_expr(df: pd.DataFrame, expr: str):
@@ -473,6 +476,47 @@ class SafeFrame:
         raise DisclosureError(
             f"{name!r} is not a column or supported method (a column named like a "
             "method must be accessed as df['{0}'])".format(name))
+
+    # -- dataset-producing verbs: return a new (private) SafeFrame --
+    def merge(self, other, *, on, how="inner") -> "SafeFrame":
+        """Join with another dataset in scope. The result is a private SafeFrame
+        (disclosure control still applies when it is finally released)."""
+        if not isinstance(other, SafeFrame):
+            raise DisclosureError("merge needs another dataset (a SafeFrame)")
+        if how not in ("inner", "left", "right", "outer"):
+            raise DisclosureError(f"unknown join type: {how!r}")
+        keys = [on] if isinstance(on, str) else list(on)
+        for c in keys:
+            if c not in self._df.columns or c not in other._df.columns:
+                raise DisclosureError(f"join key not in both datasets: {c}")
+        merged = self._df.merge(other._df, on=keys, how=how, suffixes=("", "_y"))
+        return SafeFrame(merged, self._verbs)
+
+    def summarise(self, by, **aggs) -> "SafeFrame":
+        """Group-aggregate into a new dataset: summarise('region',
+        mean_pay=('salary','mean'), n=('salary','count')). Returns a SafeFrame
+        (use pandas-style named aggregations)."""
+        if not aggs:
+            raise DisclosureError("summarise needs at least one name=(column, func)")
+        bys = [by] if isinstance(by, str) else list(by)
+        for b in bys:
+            if b not in self._df.columns:
+                raise DisclosureError(f"unknown column: {b}")
+        spec = {}
+        for name, pair in aggs.items():
+            if not (isinstance(pair, tuple) and len(pair) == 2):
+                raise DisclosureError(f"'{name}' must be (column, func)")
+            col, func = pair
+            if col not in self._df.columns:
+                raise DisclosureError(f"unknown column: {col}")
+            if func not in _SUMMARISE_FUNCS:
+                raise DisclosureError(
+                    f"agg '{func}' is not allowed; choose one of {sorted(_SUMMARISE_FUNCS)}")
+            spec[name] = (col, func)
+        out = self._df.groupby(bys, observed=True).agg(**spec).reset_index()
+        return SafeFrame(out, self._verbs)
+
+    summarize = summarise  # US spelling
 
     # -- shaping verbs: return another SafeFrame --
     def where(self, col: str, op: str, value) -> "SafeFrame":

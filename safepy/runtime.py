@@ -53,10 +53,12 @@ def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 
 def execute(code: str, namespace: dict, *, allow_imports: bool = False):
-    """Run gated ``code`` in ``namespace`` and return the final expression's value.
+    """Run gated ``code`` and return ``(final_value, ns)``.
 
-    ``namespace`` should contain the library handles (``pd``, ``np``, ...) and
-    the data sources. ``__builtins__`` is overwritten here.
+    ``ns`` is the post-execution namespace — the authoritative record of every
+    name bound during the script (used to build the dataset catalog). ``namespace``
+    should contain the library handles (``pd``, ``np``, ...) and the data sources;
+    ``__builtins__`` is overwritten here.
     """
     ns = dict(namespace)
     builtins = dict(_SAFE_BUILTINS)
@@ -82,4 +84,4 @@ def execute(code: str, namespace: dict, *, allow_imports: bool = False):
         raise SandboxError(
             f"your code raised {type(exc).__name__} during execution"
         ) from None
-    return result
+    return result, ns

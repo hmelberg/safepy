@@ -1,8 +1,14 @@
-# Plan: multiple datasets, derived frames, merge, and a schema catalog
+# Multiple datasets, derived frames, merge, and a schema catalog
 
-**Status:** planned, not implemented. Raised alongside Phase A. This is an
-evolution of the execution model (from "one script → one result" to "a session
-with several named datasets → results + a catalog").
+**Status:** **implemented** (namespace-scan approach). `df.merge(other, on=)` and
+`df.summarise(by, name=(col, func))` produce derived (private) SafeFrames;
+`run()` returns a schema-only `catalog` of every SafeFrame left in the session
+(name, columns, dtypes, and suppressed n_rows/n_missing — never values), built by
+scanning the post-execution namespace (`safepy/api.py:_build_catalog`). The
+namespace is the authoritative record and the only place variable *names* live,
+so no per-frame tracking or auto-registration is needed. Notes below kept for
+rationale; "suggested phasing" is largely done except the multiple-results
+envelope (shared with loops).
 
 ## What we want
 
