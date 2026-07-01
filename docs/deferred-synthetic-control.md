@@ -45,6 +45,34 @@ library just computes the weights we then have to guard anyway.
 | **SparseSC** (Microsoft) | heavier | SC at scale; sklearn-based. Overkill here. |
 | **CausalPy (OLS backend)** | moderate | Avoids PyMC by using its scikit-learn/OLS path; still formula-based. |
 
+## Refined recommendation: the private-intermediate pattern + an exit guard
+
+Generalise the `predict`-as-private-column idea: **compute anything internally,
+reveal only vetted aggregates.** For SC, the donor weights and the synthetic
+counterfactual are *private intermediates* (never returned); we release only the
+aggregate effect path + inference.
+
+**Crucial caveat — check the exit, not just the intermediate.** The released
+effect path is a *function* of the hidden weights. If one donor has weight ≈ 1,
+`synthetic ≈ that donor`, so the released gap (`treated − synthetic`)
+reconstructs that donor's series. Hiding the weights is not sufficient; we must
+guard what we release:
+
+1. **Primary guard — aggregate donors.** Require each unit to aggregate
+   ≥ `min_n` individuals (or accept only pre-aggregated panel input). SC's normal
+   setting (regions/firms) already satisfies this → safe by construction.
+2. **Secondary guard — no concentration.** Refuse/flag if the top donor weight
+   exceeds a threshold (~0.5). Computed from the private weights, released only as
+   a pass/fail. Doubles as a methodological quality check.
+3. **Diagnostic without leakage:** report an *effective number of donors*
+   (inverse Herfindahl of the weight vector) — an aggregate of the private
+   weights.
+
+This is the general lesson: the private-intermediate pattern secures the
+intermediate; you still verify the released aggregate can't be inverted back to
+an individual through it (for `predict`, min_n over individuals does this
+automatically; SC needs the concentration guard).
+
 ## Recommendation when we implement
 
 Prefer **pysyncon** *or* a **thin in-house SC** (scipy/cvxpy), wrapped as a
