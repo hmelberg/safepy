@@ -50,7 +50,7 @@ _ALLOWED_NODES: frozenset = frozenset({
 
 # Modules that may be imported (only when allow_imports; they resolve to safe
 # facades in the runtime, never the real modules).
-_IMPORT_WHITELIST: frozenset = frozenset({"lifelines", "numpy", "pandas"})
+_IMPORT_WHITELIST: frozenset = frozenset({"lifelines", "numpy", "pandas", "pyfixest"})
 
 # --- bare-name calls allowed (everything else must be lib.method(...)) -------
 _SAFE_BUILTINS: frozenset = frozenset({

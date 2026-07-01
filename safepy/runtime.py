@@ -46,6 +46,9 @@ def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
     if root == "pandas":
         from .namespaces import SafePd
         return SafePd()
+    if root == "pyfixest":
+        from .pyfixest_api import SafePyfixest
+        return SafePyfixest()
     raise ImportError(f"module '{name}' is not available in safepy")
 
 

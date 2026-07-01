@@ -91,3 +91,57 @@ def parse_formula(formula: str, columns) -> tuple[str, str, list[str]]:
 
     canonical_rhs = " + ".join(terms) + ("" if has_intercept else " - 1")
     return outcome, canonical_rhs, sorted(base)
+
+
+def parse_fixest_formula(formula: str, columns) -> tuple[str, list[str], list[str]]:
+    """Parse a pyfixest/fixest formula (with ``|`` sections for fixed effects and
+    IV) into ``(canonical_formula, base_columns, fe_columns)``, validating every
+    identifier. The canonical formula is rebuilt from validated tokens only, so
+    formulaic never sees anything it could evaluate.
+
+    Grammar:  outcome ~ exog [ | fe1 + fe2[^fe3] ] [ | endog ~ instruments ]
+    """
+    if not isinstance(formula, str) or "~" not in formula:
+        raise DisclosureError("formula must be a string containing '~'")
+    sections = [s.strip() for s in formula.split("|")]
+
+    lhs, rhs = sections[0].split("~", 1)
+    if rhs.strip() in ("", "1"):
+        outcome = _validate(lhs, columns)
+        rhs_canon, base = "1", {outcome}
+    else:
+        outcome, rhs_canon, base_list = parse_formula(sections[0], columns)
+        base = set(base_list)
+
+    fe_canon = iv_canon = None
+    fe_cols: list[str] = []
+    for sec in sections[1:]:
+        if not sec:
+            continue
+        if "~" in sec:  # IV part:  endog ~ instruments
+            if iv_canon is not None:
+                raise DisclosureError("formula has more than one IV part")
+            en, ins = sec.split("~", 1)
+            endog = [_validate(t, columns) for t in en.split("+")]
+            instr = [_validate(t, columns) for t in ins.split("+")]
+            base.update(endog); base.update(instr)
+            iv_canon = f"{' + '.join(endog)} ~ {' + '.join(instr)}"
+        else:  # fixed-effects part
+            if fe_canon is not None:
+                raise DisclosureError("formula has more than one fixed-effects part")
+            facs = []
+            for f in sec.split("+"):
+                f = f.strip()
+                if "^" in f:  # FE interaction
+                    cols = [_validate(c, columns) for c in f.split("^")]
+                    base.update(cols); fe_cols.extend(cols); facs.append("^".join(cols))
+                else:
+                    c = _validate(f, columns); base.add(c); fe_cols.append(c); facs.append(c)
+            fe_canon = " + ".join(facs)
+
+    canonical = f"{outcome} ~ {rhs_canon}"
+    if fe_canon:
+        canonical += f" | {fe_canon}"
+    if iv_canon:
+        canonical += f" | {iv_canon}"
+    return canonical, sorted(base), fe_cols
