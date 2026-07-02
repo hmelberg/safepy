@@ -77,6 +77,11 @@ def run(code: str,
         # so it bypasses the Python gate/runtime entirely. See r_api.
         return _run_r(code, sources, policy, active, render)
 
+    if dialect == "duckdb":
+        # SQL is AST-gated, executed in a locked engine (no external access), and
+        # released through the shared suppressor. See duckdb_api.
+        return _run_duckdb(code, sources, policy, active)
+
     try:
         namespace = _build_namespace(active, policy, sources, dialect)
         allowed_names = frozenset(namespace)
@@ -161,6 +166,30 @@ def _run_r(code: str, sources: dict, policy: Policy, active: Profile,
         return SafeResult(ok=False, kind="error", error={
             "kind": "SandboxError",
             "message": f"your R code raised {type(exc).__name__} during translation"})
+
+
+def _run_duckdb(code: str, sources: dict, policy: Policy, active: Profile) -> SafeResult:
+    """Gate, execute (locked duckdb), and release SQL through the shared core."""
+    from .duckdb_api import run_sql
+    verbs = SafeVerbs(policy)
+    try:
+        released = run_sql(code, verbs, sources)
+        res = mediate(released, policy)
+        res.audit.setdefault("level", policy.level.value)
+        res.audit.setdefault("profile", active.value)
+        res.audit.setdefault("dialect", "duckdb")
+        res.results = [res]
+        return res
+    except ValidationError as exc:
+        return SafeResult(ok=False, kind="error", error=exc.as_dict())
+    except (DisclosureError, SandboxError) as exc:
+        return SafeResult(ok=False, kind="error",
+                          error={"kind": type(exc).__name__, "message": str(exc)})
+    except BaseException as exc:  # noqa: BLE001 - sanitise: a duckdb error message
+        # may quote a data value, so only the exception type is reported.
+        return SafeResult(ok=False, kind="error", error={
+            "kind": "SandboxError",
+            "message": f"your SQL raised {type(exc).__name__} during execution"})
 
 
 def _build_catalog(ns: dict, policy: Policy) -> list:
