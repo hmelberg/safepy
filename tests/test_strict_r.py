@@ -16,6 +16,17 @@ from tests.fixtures import salaries
 
 PDF = salaries()          # pid, name, sex, region, salary; region 'Z' has n=2
 REG = pd.DataFrame({"region": ["A", "B", "Z"], "budget": [100, 200, 300]})
+# a long-form frame with unique (uid, key) for pivot_wider
+LONG = pd.DataFrame({
+    "uid": sum([[i, i] for i in range(12)], []),
+    "grp": sum([["A" if i < 6 else "B"] * 2 for i in range(12)], []),
+    "key": ["x", "y"] * 12,
+    "val": list(range(24)),
+})
+
+
+def _rlong(code):
+    return run(code, {"long": LONG}, profile=Profile.STRICT, dialect="r")
 
 
 def _pandas2(code):
@@ -190,6 +201,28 @@ def test_dangling_final_frame_refused():
     "aggregate(salary ~ sex, data = nope, FUN = mean)",                           # unknown data name
 ])
 def test_multi_statement_bad_refs_refused(code):
+    assert _r(code).ok is False
+
+
+# ---- pivots ------------------------------------------------------------------
+
+def test_pivot_longer_then_aggregate():
+    r = _r("df |> pivot_longer(cols = c(salary, pid), names_to = 'var', "
+           "values_to = 'val') |> group_by(var) |> summarise(m = mean(val))")
+    assert r.ok and set(_as_dict(r.payload)) == {"salary", "pid"}
+
+
+def test_pivot_wider_then_group_summarise():
+    r = _rlong("long |> pivot_wider(names_from = key, values_from = val) "
+               "|> group_by(grp) |> summarise(m = mean(x))")
+    assert r.ok and set(_as_dict(r.payload)) == {"A", "B"}
+
+
+@pytest.mark.parametrize("code", [
+    "df |> pivot_longer(cols = starts_with('s'), names_to = 'k', values_to = 'v') |> count(sex)",
+    "df |> pivot_longer(cols = c(nope), names_to = 'k', values_to = 'v') |> count(k)",
+])
+def test_pivot_bad_args_refused(code):
     assert _r(code).ok is False
 
 

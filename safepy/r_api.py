@@ -189,6 +189,77 @@ def _join(sf, argstr: str, env: dict, how: str):
     return sf.merge(SafeFrame(other, sf._verbs), on=on, how=how)
 
 
+def _col_token(t: str) -> str:
+    t = t.strip()
+    if t[:1] in "'\"" and t[-1:] == t[:1]:
+        return t[1:-1]
+    if _IDENT.match(t):
+        return t
+    raise ValidationError(f"expected a column name, got {t!r}", kind="syntax")
+
+
+def _name_list(val: str):
+    """Parse ``c(a, b)`` / ``c("a", "b")`` / a single bare-or-quoted name into a
+    list of column names. Tidyselect helpers (starts_with, ranges) are refused."""
+    cm = re.match(r"^c\s*\((.*)\)$", val.strip(), re.S)
+    if not cm:
+        return [_col_token(val)]
+    return [_col_token(x) for x in _split_top(cm.group(1), [","]) if x.strip()]
+
+
+def _pivot_longer(sf, argstr: str):
+    """``pivot_longer(cols = c(a, b), names_to = "name", values_to = "value")``
+    -> melt (wide -> long). Non-``cols`` columns become the id vars."""
+    cols = names_to = values_to = None
+    for a in _split_top(argstr, [","]):
+        m = re.match(r"^\s*(cols|names_to|values_to)\s*=\s*(.+)$", a.strip(), re.S)
+        if not m:
+            raise ValidationError("pivot_longer takes cols=, names_to=, values_to=",
+                                  kind="syntax")
+        key, val = m.group(1), m.group(2).strip()
+        if key == "cols":
+            cols = _name_list(val)
+        elif key == "names_to":
+            names_to = _col_token(val)
+        else:
+            values_to = _col_token(val)
+    if not cols:
+        raise ValidationError("pivot_longer needs cols = c(...)", kind="syntax")
+    for c in cols:
+        _need_col(sf._df, c)
+    id_vars = [c for c in sf._df.columns if c not in cols]
+    return sf.melt(id_vars=id_vars, value_vars=cols,
+                   var_name=names_to or "name", value_name=values_to or "value")
+
+
+def _pivot_wider(sf, argstr: str):
+    """``pivot_wider(names_from = key, values_from = value)`` -> pivot (long ->
+    wide). The remaining columns are the id columns (kept as columns, tibble-style)."""
+    from .safeframe import SafeFrame
+    names_from = values_from = None
+    for a in _split_top(argstr, [","]):
+        m = re.match(r"^\s*(names_from|values_from|id_cols|values_fill)\s*=\s*(.+)$",
+                     a.strip(), re.S)
+        if not m:
+            raise ValidationError("pivot_wider takes names_from=, values_from=",
+                                  kind="syntax")
+        key, val = m.group(1), m.group(2).strip()
+        if key == "names_from":
+            names_from = _col_token(val)
+        elif key == "values_from":
+            values_from = _col_token(val)
+    if names_from is None or values_from is None:
+        raise ValidationError("pivot_wider needs names_from= and values_from=", kind="syntax")
+    _need_col(sf._df, names_from)
+    _need_col(sf._df, values_from)
+    index = [c for c in sf._df.columns if c not in (names_from, values_from)]
+    if not index:
+        raise DisclosureError("pivot_wider needs at least one id column")
+    wide = sf._df.pivot(index=index, columns=names_from, values=values_from).reset_index()
+    wide.columns.name = None
+    return SafeFrame(wide, sf._verbs)
+
+
 def _distinct(sf, argstr: str):
     """``distinct()`` / ``distinct(cols)`` — drop duplicate rows."""
     subset = _cols(argstr) if argstr.strip() else None
@@ -480,6 +551,10 @@ def _eval_statement(stmt: str, verbs, env: dict):
             sf = _arrange(sf, argstr)
         elif verb == "distinct":
             sf = _distinct(sf, argstr)
+        elif verb == "pivot_longer":
+            sf = _pivot_longer(sf, argstr)
+        elif verb == "pivot_wider":
+            sf = _pivot_wider(sf, argstr)
         elif verb in _JOINS:
             sf = _join(sf, argstr, env, _JOINS[verb])
         elif verb == "group_by":
@@ -494,6 +569,7 @@ def _eval_statement(stmt: str, verbs, env: dict):
             raise DisclosureError(
                 f"R verb '{verb}' is not supported (group_by, summarise, count, "
                 "filter, mutate, select, rename, arrange, distinct, "
+                "pivot_longer, pivot_wider, "
                 "left_join/inner_join/right_join/full_join)")
     return sf                                        # shaping-only pipeline -> a frame
 

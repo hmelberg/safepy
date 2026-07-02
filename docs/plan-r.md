@@ -133,7 +133,10 @@ high-effort / low-return and should be **out of scope** — document it as such.
    **`case_when(cond ~ val, TRUE ~ default)`** (the parser now tokenises `~` and
    builds a first-match `np.where` chain), and **joins** (`left_join`/`inner_join`
    /`right_join`/`full_join`, `by = "k"` or `c("a","b")`, or inferred common
-   columns) → `SafeFrame.merge`. Remaining here: `across`, `transmute`, `pivot_*`.
+   columns) → `SafeFrame.merge`, and **pivots**: `pivot_longer(cols=c(...),
+   names_to=, values_to=)` → `melt`; `pivot_wider(names_from=, values_from=)` →
+   `pivot` (id columns kept tibble-style). Remaining here: `across`, `transmute`,
+   tidyselect helpers in `cols=` (`starts_with`/ranges).
 4. **(done, core) base-R analysis idioms**: `aggregate(y ~ g, data=df, FUN=mean)`,
    `table(df$x)` / `table(df$x, df$y)` → value_counts / crosstab,
    `mean|sum|median|sd|var(df$x)` → suppressed scalar, and a leading `name <-`
