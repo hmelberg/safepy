@@ -75,7 +75,7 @@ def run(code: str,
     if dialect == "r":
         # R is parsed & translated (never executed) to the shared release core,
         # so it bypasses the Python gate/runtime entirely. See r_api.
-        return _run_r(code, sources, policy, active)
+        return _run_r(code, sources, policy, active, render)
 
     try:
         namespace = _build_namespace(active, policy, sources, dialect)
@@ -135,7 +135,8 @@ def run(code: str,
                           error={"kind": "SafePythonError", "message": str(exc)})
 
 
-def _run_r(code: str, sources: dict, policy: Policy, active: Profile) -> SafeResult:
+def _run_r(code: str, sources: dict, policy: Policy, active: Profile,
+           render: str = "spec") -> SafeResult:
     """Translate a restricted R pipeline to the shared release core and mediate."""
     from .r_api import translate_r
     verbs = SafeVerbs(policy)
@@ -145,6 +146,10 @@ def _run_r(code: str, sources: dict, policy: Policy, active: Profile) -> SafeRes
         res.audit.setdefault("level", policy.level.value)
         res.audit.setdefault("profile", active.value)
         res.audit.setdefault("dialect", "r")
+        if res.kind == "chart" and render != "spec":
+            from .charts import render_chart
+            res.payload = render_chart(res.payload, render)
+            res.audit["render"] = render
         res.results = [res]
         return res
     except ValidationError as exc:

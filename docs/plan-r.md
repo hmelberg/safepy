@@ -149,7 +149,20 @@ high-effort / low-return and should be **out of scope** — document it as such.
    it; the last statement is the released result. Piping from a *result* (a
    Released) or referencing an unknown name is refused.
 5. **data.table** core `dt[i, j, by]`.
-6. **Extras** (as with pandas/polars): plots (`ggplot`/`hist`/`boxplot` → chart),
-   survival (`coxph`/`survfit`), `.ate`-style curated verbs exposed under R names.
+6. **Extras** (as with pandas/polars):
+   - **(done) Plots** — a chart is a rendering of a *suppressed aggregate*, never
+     raw data. base-R `hist(df$x)` / `boxplot(df$x)` → suppressed hist / box;
+     `ggplot(df, aes(x=col)) + geom_bar()` → value_counts bar,
+     `+ geom_histogram()` → hist, `+ geom_boxplot()` → box. **Raw-row geoms**
+     (`geom_point`/`geom_line`/`geom_col`/…) and base-R `plot(x, y)` are refused.
+     `render=spec|ascii|png|plotly|html` works via the shared `render_chart`.
+     *plotnine is NOT run on raw data* — it is only a future render backend for an
+     already-suppressed spec, exactly like matplotlib/plotly in Python.
+   - **(done) `feols(y ~ x | fe, data=df, cluster=g)`** (fixest) → the shared
+     `feols` verb (FEs absorbed, per-term suppression).
+   - **Next analysis verbs** (same delegation pattern, need fixtures/libs):
+     `coxph(Surv(t,e) ~ x, data=df)` → cox; `survfit(Surv(t,e) ~ g)` →
+     kaplan_meier; fixest IV `feols(y ~ x | fe | endog ~ z)` → iv;
+     `ate(outcome=, treatment=, confounders=c(...), data=df)` → ate.
 7. **Later, if a VM with R exists**: swap in the Rscript parse-only front end for
    full-grammar coverage (still never evaluated).

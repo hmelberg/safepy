@@ -431,14 +431,28 @@ def _base_reducer(verbs, fname: str, argstr: str, env: dict) -> Released:
     return getattr(SafeFrame(df, verbs)[dm.group(2)], _R_REDUCERS[fname])()
 
 
+def _base_plot(verbs, fname: str, argstr: str, env: dict) -> Released:
+    """``hist(df$x)`` -> suppressed binned frequency; ``boxplot(df$x)`` -> a box
+    with min_n-guarded quartiles and outliers omitted. Both are renderings of a
+    suppressed aggregate, never of raw values."""
+    from .safeframe import SafeFrame
+    dm = _DOLLAR_RE.match(_split_top(argstr, [","])[0].strip())
+    if not dm:
+        raise DisclosureError(f"{fname}(df$col) needs a single column, e.g. {fname}(df$salary)")
+    df = _env_df(dm.group(1), env)
+    _need_col(df, dm.group(2))
+    col = SafeFrame(df, verbs)[dm.group(2)]
+    return col.hist() if fname == "hist" else col.boxplot()
+
+
 def _base_r(verbs, code: str, env: dict) -> Released:
-    """A single (non-pipeline) base-R call: lm/glm, aggregate, table, or a
-    whole-column reducer. Default-deny — anything else is refused."""
+    """A single (non-pipeline) base-R call: lm/glm, aggregate, table, a whole-column
+    reducer, or a plot. Default-deny — anything else is refused."""
     m = _CALL_RE.match(code)
     if not m:
         raise DisclosureError(
             "expected an R pipeline (df |> ...) or a supported base-R call "
-            "(aggregate/table/lm/glm/mean/...)")
+            "(aggregate/table/lm/glm/mean/hist/...)")
     fname, argstr = m.group(1), m.group(2).strip()
     if fname in ("lm", "glm"):
         return _model(verbs, code, env)
@@ -448,7 +462,120 @@ def _base_r(verbs, code: str, env: dict) -> Released:
         return _table(verbs, argstr, env)
     if fname in _R_REDUCERS:
         return _base_reducer(verbs, fname, argstr, env)
+    if fname in ("hist", "boxplot"):
+        return _base_plot(verbs, fname, argstr, env)
+    if fname == "feols":
+        return _feols(verbs, argstr, env)
     raise DisclosureError(f"base-R function '{fname}' is not supported in safepy's R dialect")
+
+
+def _feols(verbs, argstr: str, env: dict) -> Released:
+    """fixest ``feols(y ~ x1 + x2 | fe1 + fe2, data=df, cluster=g)`` -> the shared
+    feols verb (fixed effects absorbed, per-term suppression). IV form
+    (``| endog ~ z``) is not translated yet."""
+    formula = data = None
+    cluster = None
+    for a in _split_top(argstr, [","]):
+        km = re.match(r"^(data|cluster|vcov)\s*=\s*(.+)$", a.strip(), re.S)
+        if km:
+            if km.group(1) == "data":
+                data = km.group(2).strip()
+            elif km.group(1) == "cluster":
+                cluster = _name_list(km.group(2).strip())
+        elif "~" in a:
+            formula = a.strip()
+    if not formula or not data:
+        raise ValidationError("feols needs a formula and data=", kind="syntax")
+    df = _env_df(data, env)
+    parts = _split_top(formula, ["|"])
+    if len(parts) > 2:
+        raise DisclosureError("feols IV form (y ~ x | fe | endog ~ z) is not supported yet")
+    lhs, rhs = parts[0].split("~", 1)
+    y = lhs.strip()
+    xs = [t.strip() for t in _split_top(rhs, ["+"]) if t.strip() and t.strip() not in ("1", "0")]
+    fe = None
+    if len(parts) == 2 and parts[1].strip() not in ("", "0"):
+        fe = [t.strip() for t in _split_top(parts[1], ["+"]) if t.strip()]
+    if not xs:
+        raise DisclosureError("feols needs at least one predictor")
+    for c in [y] + xs + (fe or []) + (cluster or []):
+        if not _IDENT.match(c):
+            raise ValidationError(f"feols terms must be column names, got {c!r}", kind="syntax")
+        _need_col(df, c)
+    return verbs.feols(df, y=y, x=xs, fe=fe, cluster=cluster)
+
+
+# ggplot geoms that draw individual rows (raw values) — refused, like a Python scatter.
+_RAW_GEOMS = frozenset({"geom_point", "geom_line", "geom_jitter", "geom_col",
+                        "geom_area", "geom_tile", "geom_path", "geom_step",
+                        "geom_count", "geom_text"})
+
+
+def _parse_aes(argstr: str) -> dict:
+    aes = {}
+    for a in _split_top(argstr, [","]):
+        m = re.match(r"^\s*(\w+)\s*=\s*([A-Za-z_.][\w.]*)\s*$", a)
+        if m:
+            aes[m.group(1)] = m.group(2)
+    return aes
+
+
+def _ggplot(verbs, code: str, env: dict) -> Released:
+    """Translate a ``ggplot(df, aes(...)) + geom_*()`` chain to the safe chart
+    path: geom_bar -> value_counts, geom_histogram -> suppressed hist, geom_boxplot
+    -> suppressed box. Raw-row geoms (geom_point/line/col/...) are refused."""
+    from .safeframe import SafeFrame
+    layers = _split_top(code, ["+"])
+    gm = re.match(r"^ggplot\s*\((.*)\)$", layers[0].strip(), re.S)
+    if not gm:
+        raise ValidationError("could not parse ggplot(...)", kind="syntax")
+    data, aes, geom = None, {}, None
+    for a in _split_top(gm.group(1), [","]):
+        a = a.strip()
+        am = re.match(r"^aes\s*\((.*)\)$", a, re.S)
+        dm = re.match(r"^data\s*=\s*([A-Za-z_.][\w.]*)$", a)
+        if am:
+            aes.update(_parse_aes(am.group(1)))
+        elif dm:
+            data = dm.group(1)
+        elif _IDENT.match(a):
+            data = data or a
+    for layer in layers[1:]:
+        lm = re.match(r"^(geom_\w+)\s*\((.*)\)$", layer.strip(), re.S)
+        if lm:
+            geom = geom or lm.group(1)
+            inner = re.search(r"aes\s*\((.*?)\)", lm.group(2), re.S)
+            if inner:
+                aes.update(_parse_aes(inner.group(1)))
+        # non-geom layers (labs/theme/scale_*/coord_*/facet_*) are ignored
+    if data is None:
+        raise ValidationError("ggplot needs a data frame", kind="syntax")
+    if geom is None:
+        raise DisclosureError("ggplot needs a geom_* layer")
+    if geom in _RAW_GEOMS:
+        raise DisclosureError(
+            f"{geom} draws individual rows and is not allowed; use geom_bar / "
+            "geom_histogram / geom_boxplot (which render suppressed aggregates)")
+    df = _env_df(data, env)
+    sf = SafeFrame(df, verbs)
+    x, y = aes.get("x"), aes.get("y")
+    if geom == "geom_histogram":
+        if not x:
+            raise DisclosureError("geom_histogram needs aes(x = col)")
+        _need_col(df, x)
+        return sf[x].hist()
+    if geom == "geom_boxplot":
+        col = y or x
+        if not col:
+            raise DisclosureError("geom_boxplot needs aes(y = col)")
+        _need_col(df, col)
+        return sf[col].boxplot()
+    if geom in ("geom_bar", "geom_freqpoly"):
+        if not x:
+            raise DisclosureError("geom_bar needs aes(x = col)")
+        _need_col(df, x)
+        return sf.value_counts(x).plot.bar()
+    raise DisclosureError(f"ggplot geom '{geom}' is not supported")
 
 
 # statement-continuation tokens: a physical line ending with one of these (or a
@@ -525,6 +652,8 @@ def _eval_statement(stmt: str, verbs, env: dict):
     stages = _split_top(stmt, ["|>", "%>%"])
     if len(stages) == 1:
         s = stages[0].strip()
+        if s.startswith("ggplot"):                   # ggplot(...) + geom_*() chart
+            return _ggplot(verbs, s, env)
         if _IDENT.match(s):                          # a bare name -> its binding
             if s not in env:
                 raise ValidationError(f"unknown name: {s!r}", kind="name")

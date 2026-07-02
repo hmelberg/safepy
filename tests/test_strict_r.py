@@ -204,6 +204,43 @@ def test_multi_statement_bad_refs_refused(code):
     assert _r(code).ok is False
 
 
+# ---- plots (translate to the safe chart path; never raw data) ---------------
+
+def test_base_r_hist_is_suppressed_chart():
+    r = _r("hist(df$salary)")
+    assert r.ok and r.kind == "chart"
+
+
+def test_base_r_boxplot_chart():
+    r = _r("boxplot(df$salary)")
+    assert r.ok and r.kind == "chart"
+
+
+def test_ggplot_geom_bar_is_value_counts_chart():
+    r = _r("ggplot(df, aes(x = region)) + geom_bar()")
+    assert r.ok and r.kind == "chart"
+
+
+def test_ggplot_geom_histogram_chart():
+    r = _r("ggplot(df, aes(x = salary)) + geom_histogram()")
+    assert r.ok and r.kind == "chart"
+
+
+def test_ggplot_geom_boxplot_chart():
+    r = _r("ggplot(df, aes(y = salary)) + geom_boxplot()")
+    assert r.ok and r.kind == "chart"
+
+
+@pytest.mark.parametrize("code", [
+    "ggplot(df, aes(x = pid, y = salary)) + geom_point()",   # scatter = raw rows
+    "ggplot(df, aes(x = pid, y = salary)) + geom_line()",
+    "ggplot(df, aes(x = sex, y = salary)) + geom_col()",     # identity y = raw
+    "plot(df$pid, df$salary)",                               # base-R scatter
+])
+def test_raw_data_plots_refused(code):
+    assert _r(code).ok is False
+
+
 # ---- pivots ------------------------------------------------------------------
 
 def test_pivot_longer_then_aggregate():
@@ -308,6 +345,13 @@ def test_lm_intercept_only_term_ignored():
 
 def test_glm_non_family_refused():
     assert _r("glm(salary ~ pid, family = gamma, data = df)").ok is False
+
+
+def test_feols_with_fixed_effect():
+    # fixest-style formula: y ~ x | fe  -> the audited feols verb (fe absorbed)
+    pytest.importorskip("pyfixest")
+    r = _r("feols(salary ~ pid | sex, data = df)")
+    assert r.ok and r.error is None
 
 
 # ---- red team: disclosive / unknown / code-execution R must be refused -------
