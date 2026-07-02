@@ -137,6 +137,51 @@ def test_multi_stat_summarise():
     assert set(r.payload["index"]) == {"F", "M"}
 
 
+# ---- case_when ---------------------------------------------------------------
+
+def test_case_when_bucket():
+    r = _r("df |> mutate(band = case_when(salary >= 50000 ~ 'hi', TRUE ~ 'lo')) "
+           "|> count(band)")
+    assert r.ok and set(_as_dict(r.payload)) == {"hi", "lo"}
+
+
+def test_case_when_three_way_first_match_wins():
+    r = _r("df |> mutate(b = case_when(salary >= 60000 ~ 'hi', "
+           "salary >= 40000 ~ 'mid', TRUE ~ 'lo')) |> count(b)")
+    assert r.ok and set(_as_dict(r.payload)) <= {"hi", "mid", "lo"}
+
+
+# ---- base R: aggregate / table / mean(df$x) / assignment ---------------------
+
+def test_aggregate_matches_pandas():
+    p = _pandas("df.groupby('sex')['salary'].mean()")
+    r = _r("aggregate(salary ~ sex, data = df, FUN = mean)")
+    assert r.ok and _as_dict(r.payload) == _as_dict(p.payload)
+
+
+def test_table_one_col_matches_value_counts():
+    p = _pandas("df['region'].value_counts()")
+    r = _r("table(df$region)")
+    assert r.ok and _as_dict(r.payload) == _as_dict(p.payload)
+    assert _as_dict(r.payload)["Z"] is None
+
+
+def test_table_two_cols_is_crosstab():
+    r = _r("table(df$sex, df$region)")
+    assert r.ok and r.payload["type"] == "frame"
+
+
+def test_base_mean_of_column_matches_pandas():
+    p = _pandas("df['salary'].mean()")
+    r = _r("mean(df$salary)")
+    assert r.ok and r.kind == "scalar" and r.payload["value"] == p.payload["value"]
+
+
+def test_leading_assignment_is_stripped():
+    r = _r("result <- df |> group_by(sex) |> summarise(m = mean(salary))")
+    assert r.ok and set(_as_dict(r.payload)) == {"F", "M"}
+
+
 # ---- base-R modelling reaches the shared facade verbs (the "extras") ---------
 
 def test_lm_matches_pandas_ols():
@@ -181,6 +226,10 @@ def test_glm_non_family_refused():
     "df |> arrange(salary)",                                 # dangling frame, no summary
     "df |> select(nope) |> count(nope)",                     # unknown column
     "df |> rename(x = nope) |> count(sex)",                  # unknown column
+    "aggregate(salary ~ sex, data = df, FUN = max)",         # disclosive FUN
+    "summary(df)",                                           # unsupported base-R fn
+    "df[df$salary > 40000, ]",                               # base-R row subset (dangling)
+    "df |> mutate(x = case_when(salary >= 5 ~ max(salary), TRUE ~ 0)) |> count(sex)",
 ])
 def test_disclosive_or_unknown_r_refused(code):
     assert _r(code).ok is False

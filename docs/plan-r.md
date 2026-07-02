@@ -129,12 +129,16 @@ high-effort / low-return and should be **out of scope** — document it as such.
    `toupper`/`tolower`/`nchar`/`substr`). Refuses unknown/disclosive funcs
    (`max`/`quantile`/`sort`/`system`) and positional `x[1]`.
 3. **(done) Tidyverse breadth**: `select(a,b)` / `select(-a)`, `rename(new=old)`,
-   `arrange(a, desc(b))`, `distinct([cols])`, and **multi-stat `summarise`**
-   (→ a frame, one column per named summary) — all reuse `SafeFrame` facade
-   methods. Remaining here: `across`, `case_when` (needs `~` in the expr parser),
-   `transmute`, `left_join`/`pivot_*`.
-4. **base-R analysis idioms**: `aggregate`, `table`, `tapply`, `cor`, `summary`,
-   `df[cond, ]`, `mean(df$x)`; multi-statement scripts with `<-`.
+   `arrange(a, desc(b))`, `distinct([cols])`, multi-stat `summarise`, and
+   **`case_when(cond ~ val, TRUE ~ default)`** (the parser now tokenises `~` and
+   builds a first-match `np.where` chain). Remaining here: `across`, `transmute`,
+   `left_join`/`pivot_*`.
+4. **(done, core) base-R analysis idioms**: `aggregate(y ~ g, data=df, FUN=mean)`,
+   `table(df$x)` / `table(df$x, df$y)` → value_counts / crosstab,
+   `mean|sum|median|sd|var(df$x)` → suppressed scalar, and a leading `name <-`
+   assignment is stripped. Remaining: `tapply`, `cor`, `summary`, `df[cond, ]`
+   (base-R row subset — currently refused as a dangling frame), multi-statement
+   scripts.
 5. **data.table** core `dt[i, j, by]`.
 6. **Extras** (as with pandas/polars): plots (`ggplot`/`hist`/`boxplot` → chart),
    survival (`coxph`/`survfit`), `.ate`-style curated verbs exposed under R names.

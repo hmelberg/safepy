@@ -27,12 +27,14 @@ _TOKEN_RE = re.compile(r"""
     | (?P<STR>"[^"]*"|'[^']*')
     | (?P<INOP>%in%)
     | (?P<MOD>%%)
-    | (?P<OP><=|>=|==|!=|&&|\|\||[-+*/^<>!&|$(),])
+    | (?P<OP><=|>=|==|!=|&&|\|\||[-+*/^<>!&|$(),~])
     | (?P<NAME>[A-Za-z_.][A-Za-z0-9_.]*)
 """, re.X)
 
 # binary left-binding powers; higher binds tighter. '^' is right-associative.
+# '~' (formula, lowest) is only meaningful inside case_when; elsewhere it errors.
 _LBP = {
+    "~": 5,
     "||": 10, "|": 10, "&&": 20, "&": 20,
     "==": 30, "!=": 30, "<": 30, "<=": 30, ">": 30, ">=": 30, "%in%": 30,
     "+": 40, "-": 40, "*": 50, "/": 50, "%%": 60, "^": 70,
@@ -182,17 +184,44 @@ def eval_expr(node, sf):
                 return -v
             return (~v) if _from_safecol(v) else (not v)
         if k == "binary":
-            op, a, b = n[1], ev(n[2]), ev(n[3])
+            op = n[1]
+            if op == "~":
+                raise DisclosureError("'~' is only valid inside case_when(...)")
+            a, b = ev(n[2]), ev(n[3])
             if op == "%in%":
                 if not _from_safecol(a):
                     raise DisclosureError("%in% needs a column on the left")
                 return a.isin(b if isinstance(b, (list, tuple)) else [b])
+            if op not in _BINOPS:
+                raise DisclosureError(f"operator {op!r} is not allowed here")
             return _BINOPS[op](a, b)
         if k == "call":
+            if n[1] == "case_when":
+                return _case_when(n[2], ev)
             return _call(n[1], [ev(a) for a in n[2]], SafeNp())
         raise ValidationError("unsupported R expression element", kind="syntax")
 
     return ev(node)
+
+
+def _case_when(arg_nodes, ev):
+    """``case_when(cond1 ~ v1, cond2 ~ v2, TRUE ~ default)`` — a first-match
+    vectorised recode. Built inside-out (last clause first) so earlier clauses
+    take priority; an unmatched row is NA when there is no ``TRUE ~`` default."""
+    from .namespaces import SafeNp
+    npf = SafeNp()
+    result = np.nan
+    for node in reversed(arg_nodes):
+        if node[0] != "binary" or node[1] != "~":
+            raise ValidationError(
+                "case_when needs 'condition ~ value' clauses", kind="syntax")
+        cond_node, val_node = node[2], node[3]
+        val = ev(val_node)
+        if cond_node == ("bool", True):        # TRUE ~ default
+            result = val
+        else:
+            result = npf.where(ev(cond_node), val, result)
+    return result
 
 
 def _call(name, args, npf):

@@ -240,20 +240,110 @@ def _model(verbs, code: str, sources: dict) -> Released:
     raise DisclosureError("glm supports family = binomial (logit) or poisson")
 
 
+_R_REDUCERS = {"mean": "mean", "sum": "sum", "median": "median",
+               "sd": "std", "var": "var"}
+_CALL_RE = re.compile(r"^([A-Za-z_.][\w.]*)\s*\((.*)\)\s*$", re.S)
+_DOLLAR_RE = re.compile(r"^([A-Za-z_.][\w.]*)\$([A-Za-z_.][\w.]*)$")
+
+
+def _aggregate(verbs, argstr: str, sources: dict) -> Released:
+    """``aggregate(y ~ g1 + g2, data=df, FUN=mean)`` -> grouped aggregation."""
+    formula = data = fun = None
+    for a in _split_top(argstr, [","]):
+        km = re.match(r"^(data|FUN|by|subset|na\.action)\s*=\s*(.+)$", a.strip(), re.S)
+        if km:
+            if km.group(1) == "data":
+                data = km.group(2).strip()
+            elif km.group(1) == "FUN":
+                fun = km.group(2).strip()
+        elif "~" in a:
+            formula = a
+    if formula is None or data is None:
+        raise ValidationError("aggregate needs a formula and data=", kind="syntax")
+    lhs, rhs = formula.split("~", 1)
+    y = lhs.strip()
+    bys = [t.strip() for t in _split_top(rhs, ["+"]) if t.strip()]
+    if not _IDENT.match(y) or not all(_IDENT.match(b) for b in bys):
+        raise ValidationError("aggregate formula terms must be column names", kind="syntax")
+    fn = (fun or "mean").strip()
+    if fn not in _AGG_MAP:
+        raise DisclosureError(f"FUN '{fn}' is not allowed; choose one of {sorted(_AGG_MAP)}")
+    df = _resolve_df(data, sources)
+    for c in [y] + bys:
+        _need_col(df, c)
+    by = bys[0] if len(bys) == 1 else bys
+    return verbs.group_agg(df, by, y, _AGG_MAP[fn])
+
+
+def _table(verbs, argstr: str, sources: dict) -> Released:
+    """``table(df$x)`` -> value_counts; ``table(df$x, df$y)`` -> crosstab."""
+    cols, frame = [], None
+    for a in _split_top(argstr, [","]):
+        dm = _DOLLAR_RE.match(a.strip())
+        if dm:
+            frame = frame or dm.group(1)
+            cols.append(dm.group(2))
+        else:
+            raise ValidationError(f"table takes df$col arguments, got {a.strip()!r}",
+                                  kind="syntax")
+    if frame is None:
+        raise ValidationError("table needs df$col (which data frame?)", kind="syntax")
+    df = _resolve_df(frame, sources)
+    for c in cols:
+        _need_col(df, c)
+    if len(cols) == 1:
+        return verbs.value_counts(df, cols[0])
+    if len(cols) == 2:
+        return verbs.crosstab(df, cols[0], cols[1])
+    raise DisclosureError("table supports one or two columns")
+
+
+def _base_reducer(verbs, fname: str, argstr: str, sources: dict) -> Released:
+    """``mean(df$x)`` / ``sum`` / ``median`` / ``sd`` / ``var`` -> a suppressed
+    whole-column scalar via the shared SafeColumn reducer."""
+    from .safeframe import SafeFrame
+    dm = _DOLLAR_RE.match(argstr.strip())
+    if not dm:
+        raise DisclosureError(f"{fname}(df$col) needs a single column, e.g. {fname}(df$salary)")
+    df = _resolve_df(dm.group(1), sources)
+    _need_col(df, dm.group(2))
+    return getattr(SafeFrame(df, verbs)[dm.group(2)], _R_REDUCERS[fname])()
+
+
+def _base_r(verbs, code: str, sources: dict) -> Released:
+    """A single (non-pipeline) base-R call: lm/glm, aggregate, table, or a
+    whole-column reducer. Default-deny — anything else is refused."""
+    m = _CALL_RE.match(code)
+    if not m:
+        raise DisclosureError(
+            "expected an R pipeline (df |> ...) or a supported base-R call "
+            "(aggregate/table/lm/glm/mean/...)")
+    fname, argstr = m.group(1), m.group(2).strip()
+    if fname in ("lm", "glm"):
+        return _model(verbs, code, sources)
+    if fname == "aggregate":
+        return _aggregate(verbs, argstr, sources)
+    if fname == "table":
+        return _table(verbs, argstr, sources)
+    if fname in _R_REDUCERS:
+        return _base_reducer(verbs, fname, argstr, sources)
+    raise DisclosureError(f"base-R function '{fname}' is not supported in safepy's R dialect")
+
+
 def translate_r(code: str, verbs, sources: dict) -> Released:
-    """Parse a restricted R pipeline and return a suppressed ``Released``."""
+    """Parse a restricted R pipeline or base-R call and return a suppressed
+    ``Released``. R is only ever parsed, never executed."""
     code = code.strip()
     if not code:
         raise ValidationError("empty program", kind="empty")
-    if _MODEL_CALL.match(code) and code.split("(", 1)[0].strip() in ("lm", "glm"):
-        return _model(verbs, code, sources)
+    am = re.match(r"^[A-Za-z_.][\w.]*\s*<-\s*(.+)$", code, re.S)   # `name <- expr`
+    if am:
+        code = am.group(1).strip()
     stages = _split_top(code, ["|>", "%>%"])
-    src = stages[0].strip()
-    if "<-" in src:                      # `result <- df |> ...`: take the data name
-        src = src.split("<-", 1)[1].strip()
+    if len(stages) == 1:                          # not a pipeline -> base-R call
+        return _base_r(verbs, code, sources)
     from .safeframe import SafeFrame
-    df = _resolve_df(src, sources)
-    sf = SafeFrame(df, verbs)            # the shared STRICT facade — option 1 reuse
+    sf = SafeFrame(_resolve_df(stages[0].strip(), sources), verbs)   # option 1 reuse
 
     group = None
     for stage in stages[1:]:
