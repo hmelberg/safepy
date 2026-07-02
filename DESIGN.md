@@ -1,12 +1,33 @@
 # safepy — design
 
+> For a current, concise project snapshot (aims, the four dialects, status) see
+> [docs/OVERVIEW.md](docs/OVERVIEW.md). This document is the deep design — threat
+> model, the provenance boundary, and the two profiles. Much of it is written
+> pandas-first; the same engine now backs four dialects (see below).
+
 ## Goal
 
-Let an analyst write a *familiar subset of Python* (pandas now; polars,
-statsmodels, lifelines, matplotlib, plotly later) against private,
-individual-level data and get back **aggregate results only** — never a row, a
-scalar extreme, or any view of an individual. Like microdata.no, but the input
-language is restricted Python rather than a bespoke DSL.
+Let an analyst submit a *familiar subset of a real analysis language* against
+private, individual-level data and get back **aggregate results only** — never a
+row, a scalar extreme, or any view of an individual. Like microdata.no, but the
+input is restricted real code rather than a bespoke DSL.
+
+Analysts write **pandas, polars, R, or SQL** (`run(..., dialect=...)`); every
+dialect maps to **one shared, audited release core** (`SafeVerbs._release_*` +
+`protect.suppress`) so disclosure control is never reimplemented per language:
+
+- **pandas** — the `SafeFrame`/`SafeColumn` capability facade described below.
+- **polars** — a polars facade with **native polars compute** (suppression
+  byte-identical to pandas); see [docs/plan-polars.md](docs/plan-polars.md).
+- **R** — a restricted dplyr/base-R surface **translated, never executed** (R is
+  a different language, so it cannot ride the Python AST gate); see
+  [docs/plan-r.md](docs/plan-r.md).
+- **DuckDB (SQL)** — **gated execution** in a locked engine (external access
+  off), AST-validated, released with paired counts through the shared suppressor;
+  see [docs/plan-duckdb.md](docs/plan-duckdb.md).
+
+The rest of this document describes the shared engine (gate, runtime, mediator,
+policy, profiles) using the pandas dialect as the worked example.
 
 ## Posture (decided)
 
@@ -214,11 +235,17 @@ encodes it to the transport the caller asked for.
 3. **(done)** statsmodels (`ols`/`logit`/`poisson`) + lifelines (`cox`/
    `kaplan_meier`) safe verbs, with per-coefficient / at-risk suppression and no
    user formula strings.
-4. polars adapter + safe verbs (lazy-plan introspection); the STRICT `SafeFrame`
-   could wrap a polars `LazyFrame` for free query-plan auditing.
-5. viz adapter — inspect the figure's **backing arrays**, not the picture
-   (plotly embeds raw arrays in its JSON; scatter = full data; box = extremes).
-6. Fold into m2py as the `language="python"` frontend; wire `/run_extended`.
+4. **(done)** polars dialect — facade + **native polars compute** (group/agg,
+   value_counts, crosstab, pivot_table, frame reducers), lazy frames, delegated
+   model/plot verbs; suppression byte-identical to pandas. See
+   [docs/plan-polars.md](docs/plan-polars.md).
+5. **(done)** charting via the safe path — a chart renders an already-suppressed
+   aggregate (never raw arrays); raw-data plots refused. Available in pandas,
+   polars, and R (`ggplot`/`hist`/`boxplot`).
+6. **(done)** R dialect — restricted dplyr/base-R **translated, never executed**
+   ([docs/plan-r.md](docs/plan-r.md)); and DuckDB (SQL) dialect — **gated
+   execution** in a locked engine ([docs/plan-duckdb.md](docs/plan-duckdb.md)).
+7. Fold into m2py / wire the Anvil `/run_extended` endpoint (next).
 
 ### Known gaps / next steps (honest list)
 

@@ -1,17 +1,37 @@
 # safepy
 
-Run a familiar **subset of Python** against private, individual-level data and
-get back **aggregate results only** — never a row, a scalar extreme, or any view
-of an individual. Think microdata.no, but the input language is restricted
-Python instead of a bespoke DSL.
+Submit a script in a **familiar analysis language** against private,
+individual-level data and get back **aggregate results only** — never a row, a
+scalar extreme, or any view of an individual. Think microdata.no, but the input
+is a restricted subset of real languages instead of a bespoke DSL.
 
-Disclosure control itself is delegated to the [`protect`](../protect) package;
-safepy owns the *language frontend* — the static gate, the sandbox, output
-mediation, and a set of curated safe verbs. See [DESIGN.md](DESIGN.md).
+Analysts write **pandas, polars, R, or SQL**; every dialect produces the same
+kind of result — a suppressed aggregate — through **one shared, audited release
+core**. Disclosure control itself is delegated to the [`protect`](../protect)
+package; safepy owns the *language frontends* + the trusted release path. For the
+full picture start at [docs/OVERVIEW.md](docs/OVERVIEW.md), then
+[DESIGN.md](DESIGN.md) and the per-dialect [`docs/plan-*.md`](docs).
 
-> **Status:** runnable. Two profiles (OPEN sandbox / STRICT capability facade),
-> pandas tabular verbs, and statsmodels + lifelines regression/survival verbs.
-> 68 tests passing. See [DESIGN.md](DESIGN.md).
+> **Status:** runnable; **580 tests passing** across four dialects (pandas,
+> polars, R, DuckDB). Two profiles (OPEN sandbox / STRICT capability facade).
+
+## Dialects — many languages, one audited release core
+
+Selected via `run(code, sources, profile=STRICT, dialect=...)`:
+
+| `dialect` | How it works |
+|---|---|
+| `"pandas"` (default) | `SafeFrame`/`SafeColumn` capability facade mirroring real pandas call shapes |
+| `"polars"` | polars facade + **native polars compute**; suppression byte-identical to pandas |
+| `"r"` | a restricted dplyr/base-R surface **translated, never executed**, mapped to the facade |
+| `"duckdb"` | SQL **executed in a locked engine** (no file/network), AST-gated, released via the shared suppressor |
+
+```python
+run("df.groupby('sex')['salary'].mean()", {"df": df}, profile=STRICT)                      # pandas
+run("df.group_by('sex').agg(pl.col('salary').mean())", {"df": pl_df}, profile=STRICT, dialect="polars")
+run("df |> group_by(sex) |> summarise(m = mean(salary))", {"df": df}, profile=STRICT, dialect="r")
+run("SELECT sex, avg(salary) FROM df GROUP BY sex", {"df": df}, profile=STRICT, dialect="duckdb")
+```
 
 ## Two profiles, one engine
 
