@@ -7,6 +7,7 @@ The load-bearing property is equivalence: an R pipeline produces the same
 suppressed ``Released`` as the pandas equivalent.
 """
 
+import pandas as pd
 import pytest
 
 from safepy import run
@@ -14,6 +15,15 @@ from safepy.policy import Profile
 from tests.fixtures import salaries
 
 PDF = salaries()          # pid, name, sex, region, salary; region 'Z' has n=2
+REG = pd.DataFrame({"region": ["A", "B", "Z"], "budget": [100, 200, 300]})
+
+
+def _pandas2(code):
+    return run(code, {"df": PDF, "reg": REG}, profile=Profile.STRICT)
+
+
+def _r2(code):
+    return run(code, {"df": PDF, "reg": REG}, profile=Profile.STRICT, dialect="r")
 
 
 def _pandas(code):
@@ -135,6 +145,28 @@ def test_multi_stat_summarise():
     assert r.ok and r.payload["type"] == "frame"
     assert set(r.payload["columns"]) == {"m", "s"}
     assert set(r.payload["index"]) == {"F", "M"}
+
+
+# ---- joins -------------------------------------------------------------------
+
+def test_left_join_then_summarise_matches_pandas():
+    p = _pandas2("df.merge(reg, on='region', how='left').groupby('sex')['budget'].mean()")
+    r = _r2("df |> left_join(reg, by = 'region') |> group_by(sex) |> summarise(m = mean(budget))")
+    assert r.ok and _as_dict(r.payload) == _as_dict(p.payload)
+
+
+def test_inner_join_runs_and_suppresses():
+    r = _r2("df |> inner_join(reg, by = 'region') |> group_by(region) "
+            "|> summarise(m = mean(budget))")
+    assert r.ok and _as_dict(r.payload)["Z"] is None      # region Z (n=2) suppressed
+
+
+@pytest.mark.parametrize("code", [
+    "df |> left_join(nope, by = 'region') |> count(sex)",     # unknown frame
+    "df |> left_join(reg, by = 'nope') |> count(sex)",        # unknown join key
+])
+def test_join_bad_args_refused(code):
+    assert _r2(code).ok is False
 
 
 # ---- case_when ---------------------------------------------------------------

@@ -131,8 +131,9 @@ high-effort / low-return and should be **out of scope** — document it as such.
 3. **(done) Tidyverse breadth**: `select(a,b)` / `select(-a)`, `rename(new=old)`,
    `arrange(a, desc(b))`, `distinct([cols])`, multi-stat `summarise`, and
    **`case_when(cond ~ val, TRUE ~ default)`** (the parser now tokenises `~` and
-   builds a first-match `np.where` chain). Remaining here: `across`, `transmute`,
-   `left_join`/`pivot_*`.
+   builds a first-match `np.where` chain), and **joins** (`left_join`/`inner_join`
+   /`right_join`/`full_join`, `by = "k"` or `c("a","b")`, or inferred common
+   columns) → `SafeFrame.merge`. Remaining here: `across`, `transmute`, `pivot_*`.
 4. **(done, core) base-R analysis idioms**: `aggregate(y ~ g, data=df, FUN=mean)`,
    `table(df$x)` / `table(df$x, df$y)` → value_counts / crosstab,
    `mean|sum|median|sd|var(df$x)` → suppressed scalar, and a leading `name <-`

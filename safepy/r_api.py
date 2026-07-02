@@ -144,6 +144,51 @@ def _arrange(sf, argstr: str):
     return sf.sort_values(by, ascending=ascending)
 
 
+_JOINS = {"left_join": "left", "inner_join": "inner",
+          "right_join": "right", "full_join": "outer"}
+
+
+def _unquote(tok: str) -> str:
+    tok = tok.strip()
+    if tok[:1] in "'\"" and tok[-1:] == tok[:1]:
+        return tok[1:-1]
+    raise ValidationError(f"join key must be a quoted column name, got {tok!r}",
+                          kind="syntax")
+
+
+def _parse_by(val: str):
+    """``by = "col"`` or ``by = c("a", "b")`` -> a column name or list of names."""
+    cm = re.match(r"^c\s*\((.*)\)$", val.strip(), re.S)
+    if cm:
+        return [_unquote(x) for x in _split_top(cm.group(1), [","]) if x.strip()]
+    return _unquote(val)
+
+
+def _join(sf, argstr: str, sources: dict, how: str):
+    """``left_join(other, by = "key")`` -> SafeFrame.merge. The joined frame stays
+    private; it exits only via a suppressed aggregate."""
+    from .safeframe import SafeFrame
+    args = _split_top(argstr, [","])
+    if not args or not _IDENT.match(args[0].strip()):
+        raise ValidationError("join needs another data frame as its first argument",
+                              kind="syntax")
+    other = _resolve_df(args[0].strip(), sources)
+    on = None
+    for a in args[1:]:
+        m = re.match(r"^by\s*=\s*(.+)$", a.strip(), re.S)
+        if m:
+            on = _parse_by(m.group(1))
+    if on is None:                      # natural join: infer shared columns
+        on = [c for c in sf._df.columns if c in other.columns]
+        if not on:
+            raise DisclosureError("join found no common columns; specify by =")
+    keys = [on] if isinstance(on, str) else list(on)
+    for c in keys:
+        if c not in sf._df.columns or c not in other.columns:
+            raise DisclosureError(f"join key not in both frames: {c}")
+    return sf.merge(SafeFrame(other, sf._verbs), on=on, how=how)
+
+
 def _distinct(sf, argstr: str):
     """``distinct()`` / ``distinct(cols)`` — drop duplicate rows."""
     subset = _cols(argstr) if argstr.strip() else None
@@ -360,6 +405,8 @@ def translate_r(code: str, verbs, sources: dict) -> Released:
             sf = _arrange(sf, argstr)
         elif verb == "distinct":
             sf = _distinct(sf, argstr)
+        elif verb in _JOINS:
+            sf = _join(sf, argstr, sources, _JOINS[verb])
         elif verb == "group_by":
             group = _cols(argstr)
             for c in group:
@@ -371,6 +418,7 @@ def translate_r(code: str, verbs, sources: dict) -> Released:
         else:
             raise DisclosureError(
                 f"R verb '{verb}' is not supported (group_by, summarise, count, "
-                "filter, mutate, select, rename, arrange, distinct)")
+                "filter, mutate, select, rename, arrange, distinct, "
+                "left_join/inner_join/right_join/full_join)")
     raise DisclosureError(
         "R pipeline did not end in a releasable summary (summarise/count)")
