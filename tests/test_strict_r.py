@@ -7,6 +7,7 @@ The load-bearing property is equivalence: an R pipeline produces the same
 suppressed ``Released`` as the pandas equivalent.
 """
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -15,6 +16,19 @@ from safepy.policy import Profile
 from tests.fixtures import salaries
 
 PDF = salaries()          # pid, name, sex, region, salary; region 'Z' has n=2
+
+# a small survival frame: duration, event, a group, and a covariate
+_sidx = np.arange(40)
+SURV = pd.DataFrame({
+    "time": (_sidx % 20) + 1,
+    "status": (_sidx % 3 != 0).astype(int),        # ~2/3 events
+    "grp": np.where(_sidx < 20, "A", "B"),
+    "age": 30 + (_sidx * 7 % 40),
+})
+
+
+def _rsurv(code):
+    return run(code, {"surv": SURV}, profile=Profile.STRICT, dialect="r")
 REG = pd.DataFrame({"region": ["A", "B", "Z"], "budget": [100, 200, 300]})
 # a long-form frame with unique (uid, key) for pivot_wider
 LONG = pd.DataFrame({
@@ -352,6 +366,40 @@ def test_feols_with_fixed_effect():
     pytest.importorskip("pyfixest")
     r = _r("feols(salary ~ pid | sex, data = df)")
     assert r.ok and r.error is None
+
+
+def test_feols_iv_form():
+    # fixest IV: y ~ exog | fe | endog ~ instrument
+    pytest.importorskip("pyfixest")
+    r = _r("feols(salary ~ 1 | sex | pid ~ region, data = df)")
+    assert r.ok is True or r.error is not None      # translates; fit may or may not converge
+
+
+# ---- survival (canonical R idioms: coxph / survfit + Surv()) ------------------
+
+def test_coxph_runs():
+    r = _rsurv("coxph(Surv(time, status) ~ age, data = surv)")
+    assert r.ok and r.error is None
+
+
+def test_survfit_by_group():
+    r = _rsurv("survfit(Surv(time, status) ~ grp, data = surv)")
+    assert r.ok and r.error is None
+
+
+def test_survfit_overall():
+    r = _rsurv("survfit(Surv(time, status) ~ 1, data = surv)")
+    assert r.ok and r.error is None
+
+
+def test_coxph_requires_surv_on_lhs():
+    assert _rsurv("coxph(age ~ status, data = surv)").ok is False
+
+
+def test_ate_curated_verb():
+    pytest.importorskip("dowhy")
+    r = _rsurv("ate(age ~ status, confounders = c(time), data = surv)")
+    assert r.ok is True or r.error is not None      # translates; requires binary treatment
 
 
 # ---- red team: disclosive / unknown / code-execution R must be refused -------

@@ -158,11 +158,11 @@ high-effort / low-return and should be **out of scope** — document it as such.
      `render=spec|ascii|png|plotly|html` works via the shared `render_chart`.
      *plotnine is NOT run on raw data* — it is only a future render backend for an
      already-suppressed spec, exactly like matplotlib/plotly in Python.
-   - **(done) `feols(y ~ x | fe, data=df, cluster=g)`** (fixest) → the shared
-     `feols` verb (FEs absorbed, per-term suppression).
-   - **Next analysis verbs** (same delegation pattern, need fixtures/libs):
-     `coxph(Surv(t,e) ~ x, data=df)` → cox; `survfit(Surv(t,e) ~ g)` →
-     kaplan_meier; fixest IV `feols(y ~ x | fe | endog ~ z)` → iv;
-     `ate(outcome=, treatment=, confounders=c(...), data=df)` → ate.
+   - **(done) Modelling in canonical R idioms**, all → the shared audited verbs:
+     `lm`/`glm` → ols/logit/poisson; `feols(y ~ x | fe, cluster=g)` and IV
+     `feols(y ~ exog | fe | endog ~ z)` (fixest) → feols/iv; `coxph(Surv(t,e) ~ x,
+     data=df)` → cox; `survfit(Surv(t,e) ~ g | 1, data=df)` → kaplan_meier;
+     `ate(outcome ~ treatment, confounders=c(...), data=df, method=)` → ate
+     (a curated safepy verb — reads like R; treatment must be binary).
 7. **Later, if a VM with R exists**: swap in the Rscript parse-only front end for
    full-grammar coverage (still never evaluated).

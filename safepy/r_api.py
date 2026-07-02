@@ -148,6 +148,11 @@ _JOINS = {"left_join": "left", "inner_join": "inner",
           "right_join": "right", "full_join": "outer"}
 
 
+def _strip_quotes(s: str) -> str:
+    s = s.strip()
+    return s[1:-1] if len(s) >= 2 and s[:1] in "'\"" and s[-1:] == s[:1] else s
+
+
 def _unquote(tok: str) -> str:
     tok = tok.strip()
     if tok[:1] in "'\"" and tok[-1:] == tok[:1]:
@@ -466,6 +471,12 @@ def _base_r(verbs, code: str, env: dict) -> Released:
         return _base_plot(verbs, fname, argstr, env)
     if fname == "feols":
         return _feols(verbs, argstr, env)
+    if fname == "coxph":
+        return _coxph(verbs, argstr, env)
+    if fname == "survfit":
+        return _survfit(verbs, argstr, env)
+    if fname == "ate":
+        return _ate(verbs, argstr, env)
     raise DisclosureError(f"base-R function '{fname}' is not supported in safepy's R dialect")
 
 
@@ -488,14 +499,24 @@ def _feols(verbs, argstr: str, env: dict) -> Released:
         raise ValidationError("feols needs a formula and data=", kind="syntax")
     df = _env_df(data, env)
     parts = _split_top(formula, ["|"])
-    if len(parts) > 2:
-        raise DisclosureError("feols IV form (y ~ x | fe | endog ~ z) is not supported yet")
+    if len(parts) > 3:
+        raise ValidationError("feols formula has too many | sections", kind="syntax")
     lhs, rhs = parts[0].split("~", 1)
     y = lhs.strip()
     xs = [t.strip() for t in _split_top(rhs, ["+"]) if t.strip() and t.strip() not in ("1", "0")]
     fe = None
-    if len(parts) == 2 and parts[1].strip() not in ("", "0"):
+    if len(parts) >= 2 and parts[1].strip() not in ("", "0"):
         fe = [t.strip() for t in _split_top(parts[1], ["+"]) if t.strip()]
+    if len(parts) == 3:                     # IV: endog ~ instruments
+        ivlhs, ivrhs = parts[2].split("~", 1)
+        endog = [t.strip() for t in _split_top(ivlhs, ["+"]) if t.strip()]
+        instruments = [t.strip() for t in _split_top(ivrhs, ["+"]) if t.strip()]
+        for c in [y] + xs + (fe or []) + endog + instruments + (cluster or []):
+            if not _IDENT.match(c):
+                raise ValidationError(f"feols terms must be column names, got {c!r}", kind="syntax")
+            _need_col(df, c)
+        return verbs.iv(df, y=y, x=xs or None, fe=fe, cluster=cluster,
+                        endog=endog[0] if len(endog) == 1 else endog, instruments=instruments)
     if not xs:
         raise DisclosureError("feols needs at least one predictor")
     for c in [y] + xs + (fe or []) + (cluster or []):
@@ -503,6 +524,83 @@ def _feols(verbs, argstr: str, env: dict) -> Released:
             raise ValidationError(f"feols terms must be column names, got {c!r}", kind="syntax")
         _need_col(df, c)
     return verbs.feols(df, y=y, x=xs, fe=fe, cluster=cluster)
+
+
+_SURV_RE = re.compile(r"^Surv\s*\(\s*([A-Za-z_.][\w.]*)\s*,\s*([A-Za-z_.][\w.]*)\s*\)$")
+
+
+def _formula_and_data(argstr: str, named=("data",)):
+    """Return ``(formula, {named-arg: value})`` from a call's arguments."""
+    formula, kw = None, {}
+    for a in _split_top(argstr, [","]):
+        a = a.strip()
+        km = re.match(r"^([A-Za-z_.][\w.]*)\s*=\s*(.+)$", a, re.S)
+        if km and km.group(1) in named:
+            kw[km.group(1)] = km.group(2).strip()
+        elif "~" in a:
+            formula = a
+    return formula, kw
+
+
+def _surv_terms(formula: str):
+    """Parse ``Surv(time, event) ~ rhs`` -> (duration, event, rhs)."""
+    lhs, rhs = formula.split("~", 1)
+    sm = _SURV_RE.match(lhs.strip())
+    if not sm:
+        raise DisclosureError("survival models need Surv(time, event) on the left")
+    return sm.group(1), sm.group(2), rhs.strip()
+
+
+def _coxph(verbs, argstr: str, env: dict) -> Released:
+    """``coxph(Surv(time, event) ~ x1 + x2, data=df)`` -> the shared cox verb."""
+    formula, kw = _formula_and_data(argstr)
+    if not formula or "data" not in kw:
+        raise ValidationError("coxph needs a formula and data=", kind="syntax")
+    duration, event, rhs = _surv_terms(formula)
+    xs = [t.strip() for t in _split_top(rhs, ["+"]) if t.strip() and t.strip() not in ("1", "0", ".")]
+    if not xs:
+        raise DisclosureError("coxph needs at least one covariate")
+    df = _env_df(kw["data"], env)
+    for c in [duration, event] + xs:
+        _need_col(df, c)
+    return verbs.cox(df, duration=duration, event=event, x=xs)
+
+
+def _survfit(verbs, argstr: str, env: dict) -> Released:
+    """``survfit(Surv(time, event) ~ group, data=df)`` (or ``~ 1`` overall) ->
+    kaplan_meier."""
+    formula, kw = _formula_and_data(argstr)
+    if not formula or "data" not in kw:
+        raise ValidationError("survfit needs a formula and data=", kind="syntax")
+    duration, event, rhs = _surv_terms(formula)
+    by = None
+    if rhs not in ("1", "0", "", "."):
+        bys = [t.strip() for t in _split_top(rhs, ["+"]) if t.strip()]
+        by = bys[0] if len(bys) == 1 else bys
+    df = _env_df(kw["data"], env)
+    for c in [duration, event] + ([by] if isinstance(by, str) else (by or [])):
+        _need_col(df, c)
+    return verbs.kaplan_meier(df, duration=duration, event=event, by=by)
+
+
+def _ate(verbs, argstr: str, env: dict) -> Released:
+    """``ate(outcome ~ treatment, confounders=c(...), data=df, method="weighting")``
+    -> the curated average-treatment-effect verb (treatment must be binary; only the
+    aggregate effect + CI + arm sizes are released). A safepy verb, not base R."""
+    formula, kw = _formula_and_data(argstr, named=("data", "confounders", "method"))
+    if not formula or "data" not in kw:
+        raise ValidationError("ate needs 'outcome ~ treatment' and data=", kind="syntax")
+    lhs, rhs = formula.split("~", 1)
+    outcome, treatment = lhs.strip(), rhs.strip()
+    if not _IDENT.match(outcome) or not _IDENT.match(treatment):
+        raise ValidationError("ate needs 'outcome ~ treatment' as column names", kind="syntax")
+    confounders = _name_list(kw["confounders"]) if "confounders" in kw else []
+    method = _strip_quotes(kw.get("method", "weighting"))
+    df = _env_df(kw["data"], env)
+    for c in [outcome, treatment] + confounders:
+        _need_col(df, c)
+    return verbs.ate(df, outcome=outcome, treatment=treatment,
+                     confounders=confounders, method=method)
 
 
 # ggplot geoms that draw individual rows (raw values) — refused, like a Python scatter.
