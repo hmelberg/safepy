@@ -147,6 +147,52 @@ def test_multi_stat_summarise():
     assert set(r.payload["index"]) == {"F", "M"}
 
 
+# ---- multi-statement scripts -------------------------------------------------
+
+def test_multi_statement_intermediate_frame():
+    p = _pandas("df[df['salary'] >= 40000].groupby('sex')['salary'].mean()")
+    r = _r("x <- df |> filter(salary >= 40000)\n"
+           "x |> group_by(sex) |> summarise(m = mean(salary))")
+    assert r.ok and _as_dict(r.payload) == _as_dict(p.payload)
+
+
+def test_multi_statement_semicolons():
+    r = _r("x <- df |> mutate(k = salary / 1000); "
+           "x |> group_by(sex) |> summarise(m = mean(k))")
+    assert r.ok and set(_as_dict(r.payload)) == {"F", "M"}
+
+
+def test_multiline_pipeline_trailing_pipe():
+    r = _r("df |>\n  group_by(sex) |>\n  summarise(m = mean(salary))")
+    assert r.ok and set(_as_dict(r.payload)) == {"F", "M"}
+
+
+def test_comments_are_ignored():
+    r = _r("# compute mean salary by sex\n"
+           "df |> group_by(sex) |> summarise(m = mean(salary))  # done")
+    assert r.ok and set(_as_dict(r.payload)) == {"F", "M"}
+
+
+def test_intermediate_feeds_base_r_data():
+    r = _r("sub <- df |> filter(region %in% c('A', 'B'))\n"
+           "aggregate(salary ~ sex, data = sub, FUN = mean)")
+    assert r.ok and set(_as_dict(r.payload)) == {"F", "M"}
+
+
+def test_dangling_final_frame_refused():
+    # last statement is a bare frame -> not releasable
+    assert _r("x <- df |> filter(salary >= 40000)\nx").ok is False
+
+
+@pytest.mark.parametrize("code", [
+    "x <- df |> group_by(sex) |> summarise(m = mean(salary))\nx |> count(sex)",  # pipe from a result
+    "y |> group_by(sex) |> summarise(m = mean(salary))",                          # unknown name
+    "aggregate(salary ~ sex, data = nope, FUN = mean)",                           # unknown data name
+])
+def test_multi_statement_bad_refs_refused(code):
+    assert _r(code).ok is False
+
+
 # ---- joins -------------------------------------------------------------------
 
 def test_left_join_then_summarise_matches_pandas():

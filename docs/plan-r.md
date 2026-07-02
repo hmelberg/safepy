@@ -138,8 +138,13 @@ high-effort / low-return and should be **out of scope** — document it as such.
    `table(df$x)` / `table(df$x, df$y)` → value_counts / crosstab,
    `mean|sum|median|sd|var(df$x)` → suppressed scalar, and a leading `name <-`
    assignment is stripped. Remaining: `tapply`, `cor`, `summary`, `df[cond, ]`
-   (base-R row subset — currently refused as a dangling frame), multi-statement
-   scripts.
+   (base-R row subset — currently refused as a dangling frame).
+5. **(done) Multi-statement scripts**: statements split on `;` and newlines
+   (continuation-aware: unbalanced brackets / trailing or leading pipe-operator
+   continue a statement; `#` comments stripped). `name <- expr` binds intermediate
+   frames in an environment; sources, join targets and base-R `data=` resolve from
+   it; the last statement is the released result. Piping from a *result* (a
+   Released) or referencing an unknown name is refused.
 5. **data.table** core `dt[i, j, by]`.
 6. **Extras** (as with pandas/polars): plots (`ggplot`/`hist`/`boxplot` → chart),
    survival (`coxph`/`survfit`), `.ate`-style curated verbs exposed under R names.

@@ -164,7 +164,7 @@ def _parse_by(val: str):
     return _unquote(val)
 
 
-def _join(sf, argstr: str, sources: dict, how: str):
+def _join(sf, argstr: str, env: dict, how: str):
     """``left_join(other, by = "key")`` -> SafeFrame.merge. The joined frame stays
     private; it exits only via a suppressed aggregate."""
     from .safeframe import SafeFrame
@@ -172,7 +172,7 @@ def _join(sf, argstr: str, sources: dict, how: str):
     if not args or not _IDENT.match(args[0].strip()):
         raise ValidationError("join needs another data frame as its first argument",
                               kind="syntax")
-    other = _resolve_df(args[0].strip(), sources)
+    other = _env_df(args[0].strip(), env)
     on = None
     for a in args[1:]:
         m = re.match(r"^by\s*=\s*(.+)$", a.strip(), re.S)
@@ -239,14 +239,19 @@ def _count(sf, argstr: str) -> Released:
 _MODEL_CALL = re.compile(r"^(lm|glm)\s*\((.*)\)\s*$", re.S)
 
 
-def _resolve_df(name, sources):
-    if name not in sources:
+def _env_df(name, env):
+    """Resolve a name (a source or an assigned intermediate) to its pandas frame.
+    Refuses a name bound to a *result* (a Released), which is not a data frame."""
+    from .safeframe import SafeFrame
+    if name not in env:
         raise ValidationError(f"unknown data source: {name!r}", kind="name")
-    df = sources[name]
-    return df.to_pandas() if hasattr(df, "to_pandas") else df
+    v = env[name]
+    if not isinstance(v, SafeFrame):
+        raise DisclosureError(f"'{name}' is a result, not a data frame")
+    return v._df
 
 
-def _model(verbs, code: str, sources: dict) -> Released:
+def _model(verbs, code: str, env: dict) -> Released:
     """``lm(y ~ x1 + x2, data=df)`` / ``glm(y ~ x, family=binomial, data=df)`` ->
     the shared regression verbs (ols/logit/poisson), reusing the same
     per-coefficient suppression as the pandas/polars dialects."""
@@ -266,7 +271,7 @@ def _model(verbs, code: str, sources: dict) -> Released:
             formula = a
     if formula is None or data is None:
         raise ValidationError(f"{kind}() needs a formula and data=", kind="syntax")
-    df = _resolve_df(data, sources)
+    df = _env_df(data, env)
     lhs, rhs = formula.split("~", 1)
     y = lhs.strip()
     xs = [t.strip() for t in _split_top(rhs, ["+"])
@@ -291,7 +296,7 @@ _CALL_RE = re.compile(r"^([A-Za-z_.][\w.]*)\s*\((.*)\)\s*$", re.S)
 _DOLLAR_RE = re.compile(r"^([A-Za-z_.][\w.]*)\$([A-Za-z_.][\w.]*)$")
 
 
-def _aggregate(verbs, argstr: str, sources: dict) -> Released:
+def _aggregate(verbs, argstr: str, env: dict) -> Released:
     """``aggregate(y ~ g1 + g2, data=df, FUN=mean)`` -> grouped aggregation."""
     formula = data = fun = None
     for a in _split_top(argstr, [","]):
@@ -313,14 +318,14 @@ def _aggregate(verbs, argstr: str, sources: dict) -> Released:
     fn = (fun or "mean").strip()
     if fn not in _AGG_MAP:
         raise DisclosureError(f"FUN '{fn}' is not allowed; choose one of {sorted(_AGG_MAP)}")
-    df = _resolve_df(data, sources)
+    df = _env_df(data, env)
     for c in [y] + bys:
         _need_col(df, c)
     by = bys[0] if len(bys) == 1 else bys
     return verbs.group_agg(df, by, y, _AGG_MAP[fn])
 
 
-def _table(verbs, argstr: str, sources: dict) -> Released:
+def _table(verbs, argstr: str, env: dict) -> Released:
     """``table(df$x)`` -> value_counts; ``table(df$x, df$y)`` -> crosstab."""
     cols, frame = [], None
     for a in _split_top(argstr, [","]):
@@ -333,7 +338,7 @@ def _table(verbs, argstr: str, sources: dict) -> Released:
                                   kind="syntax")
     if frame is None:
         raise ValidationError("table needs df$col (which data frame?)", kind="syntax")
-    df = _resolve_df(frame, sources)
+    df = _env_df(frame, env)
     for c in cols:
         _need_col(df, c)
     if len(cols) == 1:
@@ -343,19 +348,19 @@ def _table(verbs, argstr: str, sources: dict) -> Released:
     raise DisclosureError("table supports one or two columns")
 
 
-def _base_reducer(verbs, fname: str, argstr: str, sources: dict) -> Released:
+def _base_reducer(verbs, fname: str, argstr: str, env: dict) -> Released:
     """``mean(df$x)`` / ``sum`` / ``median`` / ``sd`` / ``var`` -> a suppressed
     whole-column scalar via the shared SafeColumn reducer."""
     from .safeframe import SafeFrame
     dm = _DOLLAR_RE.match(argstr.strip())
     if not dm:
         raise DisclosureError(f"{fname}(df$col) needs a single column, e.g. {fname}(df$salary)")
-    df = _resolve_df(dm.group(1), sources)
+    df = _env_df(dm.group(1), env)
     _need_col(df, dm.group(2))
     return getattr(SafeFrame(df, verbs)[dm.group(2)], _R_REDUCERS[fname])()
 
 
-def _base_r(verbs, code: str, sources: dict) -> Released:
+def _base_r(verbs, code: str, env: dict) -> Released:
     """A single (non-pipeline) base-R call: lm/glm, aggregate, table, or a
     whole-column reducer. Default-deny — anything else is refused."""
     m = _CALL_RE.match(code)
@@ -365,31 +370,101 @@ def _base_r(verbs, code: str, sources: dict) -> Released:
             "(aggregate/table/lm/glm/mean/...)")
     fname, argstr = m.group(1), m.group(2).strip()
     if fname in ("lm", "glm"):
-        return _model(verbs, code, sources)
+        return _model(verbs, code, env)
     if fname == "aggregate":
-        return _aggregate(verbs, argstr, sources)
+        return _aggregate(verbs, argstr, env)
     if fname == "table":
-        return _table(verbs, argstr, sources)
+        return _table(verbs, argstr, env)
     if fname in _R_REDUCERS:
-        return _base_reducer(verbs, fname, argstr, sources)
+        return _base_reducer(verbs, fname, argstr, env)
     raise DisclosureError(f"base-R function '{fname}' is not supported in safepy's R dialect")
 
 
-def translate_r(code: str, verbs, sources: dict) -> Released:
-    """Parse a restricted R pipeline or base-R call and return a suppressed
-    ``Released``. R is only ever parsed, never executed."""
-    code = code.strip()
-    if not code:
-        raise ValidationError("empty program", kind="empty")
-    am = re.match(r"^[A-Za-z_.][\w.]*\s*<-\s*(.+)$", code, re.S)   # `name <- expr`
-    if am:
-        code = am.group(1).strip()
-    stages = _split_top(code, ["|>", "%>%"])
-    if len(stages) == 1:                          # not a pipeline -> base-R call
-        return _base_r(verbs, code, sources)
-    from .safeframe import SafeFrame
-    sf = SafeFrame(_resolve_df(stages[0].strip(), sources), verbs)   # option 1 reuse
+# statement-continuation tokens: a physical line ending with one of these (or a
+# next line starting with one) continues the current statement.
+_CONT_TRAIL = ("|>", "%>%", "+", "-", "*", "/", "^", "&", "|", ",", "~", "<-",
+               "(", "<", ">", "<=", ">=", "==", "!=")
+_CONT_LEAD = ("|>", "%>%", "+", "*", "/", "^", "&", "|", ",", ")")
 
+
+def _strip_comment(line: str) -> str:
+    """Drop an R ``#`` comment (respecting string literals)."""
+    out, quote = [], None
+    for ch in line:
+        if quote:
+            out.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch; out.append(ch)
+        elif ch == "#":
+            break
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _depth(s: str) -> int:
+    d, quote = 0, None
+    for ch in s:
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "([{":
+            d += 1
+        elif ch in ")]}":
+            d -= 1
+    return d
+
+
+def _split_statements(code: str) -> list[str]:
+    """Split an R script into statements, merging continuation lines (unbalanced
+    brackets, a trailing pipe/operator, or a next line that leads with one) and
+    honouring ``;`` separators. Comments are stripped."""
+    lines = [_strip_comment(l) for l in code.split("\n")]
+    stmts, buf = [], ""
+    for i, line in enumerate(lines):
+        buf = (buf + "\n" + line) if buf else line
+        b = buf.strip()
+        if not b:
+            buf = ""
+            continue
+        if _depth(buf) > 0 or b.endswith(_CONT_TRAIL):
+            continue
+        nxt = next((lines[j].strip() for j in range(i + 1, len(lines))
+                    if lines[j].strip()), "")
+        if nxt.startswith(_CONT_LEAD):
+            continue
+        for part in _split_top(buf, [";"]):
+            if part.strip():
+                stmts.append(part.strip())
+        buf = ""
+    for part in _split_top(buf, [";"]):              # trailing (unterminated) buffer
+        if part.strip():
+            stmts.append(part.strip())
+    return stmts
+
+
+def _eval_statement(stmt: str, verbs, env: dict):
+    """Evaluate one statement to a SafeFrame (shaping) or a Released (terminal /
+    a bare name that refers to a bound result)."""
+    from .safeframe import SafeFrame
+    stages = _split_top(stmt, ["|>", "%>%"])
+    if len(stages) == 1:
+        s = stages[0].strip()
+        if _IDENT.match(s):                          # a bare name -> its binding
+            if s not in env:
+                raise ValidationError(f"unknown name: {s!r}", kind="name")
+            return env[s]
+        return _base_r(verbs, s, env)                # a base-R call
+    src = stages[0].strip()
+    if src not in env:
+        raise ValidationError(f"unknown data source: {src!r}", kind="name")
+    if not isinstance(env[src], SafeFrame):
+        raise DisclosureError(f"cannot pipe from '{src}' (it is a result, not a frame)")
+    sf = env[src]
     group = None
     for stage in stages[1:]:
         verb, argstr = _parse_stage(stage)
@@ -406,7 +481,7 @@ def translate_r(code: str, verbs, sources: dict) -> Released:
         elif verb == "distinct":
             sf = _distinct(sf, argstr)
         elif verb in _JOINS:
-            sf = _join(sf, argstr, sources, _JOINS[verb])
+            sf = _join(sf, argstr, env, _JOINS[verb])
         elif verb == "group_by":
             group = _cols(argstr)
             for c in group:
@@ -420,5 +495,27 @@ def translate_r(code: str, verbs, sources: dict) -> Released:
                 f"R verb '{verb}' is not supported (group_by, summarise, count, "
                 "filter, mutate, select, rename, arrange, distinct, "
                 "left_join/inner_join/right_join/full_join)")
-    raise DisclosureError(
-        "R pipeline did not end in a releasable summary (summarise/count)")
+    return sf                                        # shaping-only pipeline -> a frame
+
+
+def translate_r(code: str, verbs, sources: dict) -> Released:
+    """Parse a restricted R script (one or more statements) and return a suppressed
+    ``Released``. R is only ever parsed, never executed. Assignments (``name <-
+    expr``) bind intermediate frames in an environment; the final statement is the
+    released result."""
+    from .safeframe import SafeFrame
+    if not code.strip():
+        raise ValidationError("empty program", kind="empty")
+    env = {name: SafeFrame(df.to_pandas() if hasattr(df, "to_pandas") else df, verbs)
+           for name, df in sources.items()}
+    result = None
+    for stmt in _split_statements(code):
+        am = re.match(r"^([A-Za-z_.][\w.]*)\s*<-\s*(.+)$", stmt, re.S)   # name <- expr
+        if am:
+            result = _eval_statement(am.group(2).strip(), verbs, env)
+            env[am.group(1)] = result
+        else:
+            result = _eval_statement(stmt, verbs, env)
+    if result is None:
+        raise DisclosureError("R script did not end in a releasable result")
+    return result   # the last statement's value; a bare SafeFrame is refused by the mediator
