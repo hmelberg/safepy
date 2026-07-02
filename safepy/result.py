@@ -33,7 +33,7 @@ class SafeResult:
     """What the API returns. ``payload`` is render-ready and disclosure-checked;
     ``audit`` records what was done (suppressed cells, thresholds, verbs used)."""
     ok: bool
-    kind: str                       # "table" | "scalar" | "model" | "plot" | "none" | "error"
+    kind: str                       # "table" | "scalar" | "model" | "chart" | "none" | "error"
     payload: Any = None
     audit: dict = field(default_factory=dict)
     error: dict | None = None
