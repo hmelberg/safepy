@@ -124,6 +124,64 @@ def test_isolating_subquery_is_suppressed_not_leaked():
     assert q.ok is False or all(v is None for v in q.payload["values"])
 
 
+# ---- v2 polish ---------------------------------------------------------------
+
+def test_group_key_missing_from_select_is_auto_added():
+    # legal SQL: the key appears only in GROUP BY; we auto-include it in the output
+    q = _sql("SELECT avg(salary) FROM df GROUP BY sex")
+    assert q.ok and set(_as_dict(q.payload)) == {"F", "M"}
+
+
+def test_count_distinct_matches_pandas_nunique():
+    q = _sql("SELECT sex, count(DISTINCT region) FROM df GROUP BY sex",
+             suppression="light")               # light: no value rounding
+    p = PDF.groupby("sex")["region"].nunique()
+    assert q.ok
+    assert _as_dict(q.payload) == {k: int(v) for k, v in p.items()}
+
+
+def test_group_by_expression_matches_pandas():
+    p = _pandas("df.assign(r=df['region'].str.slice(0, 1))"
+                ".groupby('r')['salary'].mean()")
+    q = _sql("SELECT substr(region, 1, 1) AS r, avg(salary) FROM df "
+             "GROUP BY substr(region, 1, 1)")
+    assert q.ok
+    assert _as_dict(q.payload) == _as_dict(p.payload)
+
+
+def test_order_by_group_key_allowed():
+    q = _sql("SELECT sex, avg(salary) FROM df GROUP BY sex ORDER BY sex")
+    assert q.ok
+
+
+def test_catalog_lists_registered_frames():
+    q = _sql("SELECT sex, avg(salary) FROM df GROUP BY sex")
+    cat = {c["name"]: c for c in (q.catalog or [])}
+    assert "df" in cat and cat["df"]["n_columns"] == 5
+
+
+@pytest.mark.parametrize("code", [
+    # ORDER BY an aggregate (or its alias/position) is an unprotected oracle on
+    # the exact, unrounded values — the *order* leaks beyond the rounded release.
+    "SELECT sex, avg(salary) FROM df GROUP BY sex ORDER BY avg(salary)",
+    "SELECT sex, avg(salary) AS m FROM df GROUP BY sex ORDER BY m",
+    "SELECT sex, avg(salary) FROM df GROUP BY sex ORDER BY 2",
+    # HAVING filters on exact aggregate values -> row presence is an oracle
+    # (binary search recovers unrounded means / unnoised counts).
+    "SELECT sex, avg(salary) FROM df GROUP BY sex HAVING avg(salary) > 50000",
+    "SELECT region, count(*) FROM df GROUP BY region HAVING count(*) = 2",
+    # arithmetic on aggregates: scaling defeats value-rounding (avg*1e6 then
+    # divide mentally), and +0 would strip Tiltak-3 count noise from sums/counts.
+    "SELECT sex, avg(salary) / 1000 FROM df GROUP BY sex",
+    "SELECT sex, sum(salary) + 0 FROM df GROUP BY sex",
+    # DISTINCT on non-count aggregates stays denied
+    "SELECT sex, sum(DISTINCT salary) FROM df GROUP BY sex",
+])
+def test_oracle_channels_refused(code):
+    r = _sql(code)
+    assert r.ok is False, f"expected refusal: {code!r}"
+
+
 # ---- red team: everything else is refused ------------------------------------
 
 @pytest.mark.parametrize("code", [

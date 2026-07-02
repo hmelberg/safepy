@@ -178,6 +178,7 @@ def _run_duckdb(code: str, sources: dict, policy: Policy, active: Profile) -> Sa
         res.audit.setdefault("level", policy.level.value)
         res.audit.setdefault("profile", active.value)
         res.audit.setdefault("dialect", "duckdb")
+        res.catalog = _raw_catalog(sources, policy)
         res.results = [res]
         return res
     except ValidationError as exc:
@@ -190,6 +191,29 @@ def _run_duckdb(code: str, sources: dict, policy: Policy, active: Profile) -> Sa
         return SafeResult(ok=False, kind="error", error={
             "kind": "SandboxError",
             "message": f"your SQL raised {type(exc).__name__} during execution"})
+
+
+def _raw_catalog(sources: dict, policy: Policy) -> list:
+    """Schema-only catalog of raw source frames (for the duckdb dialect), with the
+    same suppressed row/missing counts as _build_catalog."""
+    k, rt = policy.min_n, policy.round_to
+
+    def count(n: int):
+        n = int(n)
+        if n == 0:
+            return 0
+        if n < k:
+            return None
+        return int(round(n / rt) * rt) if rt else n
+
+    cat = []
+    for name, df in sources.items():
+        d = df.to_pandas() if hasattr(df, "to_pandas") else df
+        cols = [{"name": str(c), "dtype": str(d[c].dtype),
+                 "n_missing": count(d[c].isna().sum())} for c in d.columns]
+        cat.append({"name": name, "n_rows": count(len(d)),
+                    "n_columns": len(d.columns), "columns": cols})
+    return cat
 
 
 def _build_catalog(ns: dict, policy: Policy) -> list:

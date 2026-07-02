@@ -53,14 +53,29 @@ CTEs, joins between registered frames; equivalence-tested against the pandas
 dialect incl. the microdata count-noise tier; red-team suite in
 `tests/test_strict_duckdb.py`.
 
+## v2 polish (done)
+
+- **GROUP BY expressions** (`GROUP BY substr(region,1,1)`): select items are
+  matched to group keys by a canonical signature, not just column name.
+- **Auto-add missing group keys** to the output (`SELECT avg(x) ... GROUP BY g`
+  still labels rows by `g`).
+- **`count(DISTINCT col)`**: paired with a plain `count(col)` (the contributing
+  group size) and released on the min_n floor; matches pandas `nunique` at the
+  `light` tier.
+- **Schema catalog** of registered frames (suppressed row/missing counts).
+- **Oracle channels closed** (deliberately refused, with reasons):
+  - `ORDER BY <aggregate | its alias | its position>` — the *ordering* leaks the
+    exact, unrounded values beyond the rounded release. ORDER BY is allowed only
+    on GROUP BY keys.
+  - `HAVING` / `QUALIFY` — filter on exact aggregate values; row presence is a
+    binary-search oracle on unrounded means / unnoised counts.
+  - arithmetic on an aggregate in the outer select (`avg(x)/1000`, `sum(x)+0`) —
+    scaling defeats value-rounding and `+0` would strip Tiltak-3 count noise.
+  - `DISTINCT` on non-`count` aggregates.
+
 ## Not yet / later
 
-- `HAVING` (walk it with the same whitelist), `count(DISTINCT x)` (→ nunique
-  floor), grouping by expressions (`GROUP BY substr(region,1,1)`).
-- Window functions inside subqueries (polars allows `.over()`; SQL v1 denies all
-  windows — revisit with a per-type whitelist that still denies `min`/`max`
-  windows).
-- Order statistics under the shared order-stat rule (`quantile_cont` with the
+- Order statistics under the shared order-stat rule (`quantile_cont` + the
   min-support check) — needs a dedicated release path, like `SafeColumn.quantile`.
+- Window functions inside subqueries (v1 denies all windows).
 - Resource limits (memory cap / statement timeout) as robustness hardening.
-- The catalog for SQL sessions (schema of registered frames).

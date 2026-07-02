@@ -126,8 +126,9 @@ def _walk(obj):
             fn = (obj.get("function_name") or "").lower()
             if fn not in _ALLOWED_FUNCS:
                 raise DisclosureError(f"SQL function '{fn}' is not allowed in safepy")
-            if obj.get("distinct"):
-                raise DisclosureError("DISTINCT aggregates are not supported yet")
+            if obj.get("distinct") and fn != "count":
+                raise DisclosureError(
+                    "DISTINCT is only supported inside count(DISTINCT col)")
         if obj.get("sample"):
             raise DisclosureError("USING SAMPLE is not supported")
         for v in obj.values():
@@ -144,47 +145,103 @@ def _colname(item) -> str:
     return names[-1]
 
 
-def _validate_outer(node):
-    """The outer select is the release boundary: only GROUP BY keys and safe
-    aggregates may appear, and at least one aggregate is required (a keys-only
-    select is a DISTINCT dump)."""
-    for m in node.get("modifiers") or []:
-        t = m.get("type")
-        if t not in ("ORDER_MODIFIER", "LIMIT_MODIFIER"):
-            raise DisclosureError(f"SQL modifier '{t}' is not supported")
+def _sig(expr) -> str:
+    """A canonical signature of an expression (ignoring source location and alias)
+    so a select item can be matched to a GROUP BY expression."""
+    def strip(o):
+        if isinstance(o, dict):
+            return {k: strip(v) for k, v in sorted(o.items())
+                    if k not in ("query_location", "alias")}
+        if isinstance(o, list):
+            return [strip(v) for v in o]
+        return o
+    return json.dumps(strip(expr), sort_keys=True)
+
+
+def _is_agg(item) -> bool:
+    return (item.get("class") == "FUNCTION"
+            and (item.get("function_name") or "").lower() in _SQL_AGGS)
+
+
+def _prepare_outer(node):
+    """Validate the outer select (the release boundary) and return
+    ``(group_out_names, agg_items)``. Only GROUP BY keys and safe aggregates may
+    appear; ORDER BY may only reference group keys (ordering by an aggregate leaks
+    the exact, unrounded values); HAVING/QUALIFY are refused (they filter on exact
+    aggregate values — an oracle). Missing group keys are auto-added to the output;
+    GROUP BY expressions are supported."""
     if node.get("having"):
-        raise DisclosureError("HAVING is not supported yet; filter with WHERE")
+        raise DisclosureError(
+            "HAVING is not supported: it filters on exact aggregate values "
+            "(an oracle on unrounded results). Filter rows with WHERE instead.")
     if node.get("qualify"):
         raise DisclosureError("QUALIFY is not supported")
+
     group_exprs = (node.get("group_expressions")
                    or (node.get("groups") or {}).get("group_expressions") or [])
-    group_cols = []
-    for g in group_exprs:
-        if g.get("class") != "COLUMN_REF":
-            raise DisclosureError("GROUP BY must use plain column names")
-        group_cols.append(_colname(g))
-    aggs = []
-    for it in node.get("select_list") or []:
-        alias = it.get("alias") or ""
-        if alias.startswith("__"):
-            raise ValidationError("aliases may not start with '__'", kind="name")
-        cls = it.get("class")
-        if cls == "COLUMN_REF":
-            if _colname(it) not in group_cols:
+    group_sigs = {_sig(g) for g in group_exprs}
+    group_cols = {_colname(g) for g in group_exprs if g.get("class") == "COLUMN_REF"}
+
+    # ORDER BY: only group keys (a plain group column, or a group expression).
+    for m in node.get("modifiers") or []:
+        t = m.get("type")
+        if t == "LIMIT_MODIFIER":
+            continue
+        if t != "ORDER_MODIFIER":
+            raise DisclosureError(f"SQL modifier '{t}' is not supported")
+        for order in m.get("orders") or []:
+            e = order.get("expression") or {}
+            ok = (e.get("class") == "COLUMN_REF" and _colname(e) in group_cols) \
+                or _sig(e) in group_sigs
+            if not ok:
                 raise DisclosureError(
-                    f"bare column '{_colname(it)}' must appear in GROUP BY; "
-                    "individual values are never released")
-        elif cls == "FUNCTION" and (it.get("function_name") or "").lower() in _SQL_AGGS:
+                    "ORDER BY may only reference GROUP BY keys; ordering by an "
+                    "aggregate would leak the exact (unrounded) values")
+
+    select_list = node.get("select_list") or []
+    aggs, present_group_sigs = [], set()
+    for it in select_list:
+        if (it.get("alias") or "").startswith("__"):
+            raise ValidationError("aliases may not start with '__'", kind="name")
+        if _is_agg(it):
             aggs.append(it)
-        else:
-            raise DisclosureError(
-                "each SELECT item must be a GROUP BY key or a safe aggregate "
-                "(avg/sum/count/median/stddev/var_samp)")
+            continue
+        # otherwise it must be a group key (plain column or a group expression)
+        is_col = it.get("class") == "COLUMN_REF" and _colname(it) in group_cols
+        if is_col or _sig(it) in group_sigs:
+            present_group_sigs.add(_sig(it) if not is_col else _colname(it))
+            if not it.get("alias"):
+                it["alias"] = _colname(it) if is_col else "__grp"
+            continue
+        raise DisclosureError(
+            "each SELECT item must be a GROUP BY key or a safe aggregate "
+            "(avg/sum/count/count(DISTINCT)/median/stddev/var_samp); "
+            "bare columns and arithmetic on aggregates are not released")
+
     if not aggs:
         raise DisclosureError(
             "the query must compute at least one aggregate; raw rows or distinct "
             "values are never released")
-    return group_cols, aggs
+
+    # auto-add any GROUP BY key missing from the select, so it becomes a row label.
+    group_out = []
+    for j, g in enumerate(group_exprs):
+        key = _colname(g) if g.get("class") == "COLUMN_REF" else _sig(g)
+        # find an existing select item for this group expr to reuse its alias
+        alias = None
+        for it in select_list:
+            it_key = (_colname(it) if it.get("class") == "COLUMN_REF"
+                      and _colname(it) in group_cols else _sig(it))
+            if not _is_agg(it) and it_key == key:
+                alias = it.get("alias")
+                break
+        if alias is None:
+            alias = _colname(g) if g.get("class") == "COLUMN_REF" else f"__grp_{j}"
+            add = copy.deepcopy(g)
+            add["alias"] = alias
+            select_list.append(add)
+        group_out.append(alias)
+    return group_out, aggs
 
 
 def _agg_arg_name(a) -> str:
@@ -196,13 +253,10 @@ def _agg_arg_name(a) -> str:
 
 
 def _inject_counts(node, aggs):
-    """Rewrite the outer select list: give every item a known output alias and pair
-    each aggregate with a ``count`` over the same argument (``count(*)`` pairs with
-    itself). The rewritten AST is deserialized back to SQL and executed once."""
+    """Pair each aggregate with a ``count`` over the same argument (``count(*)``
+    pairs with itself; ``count(DISTINCT x)`` pairs with a plain ``count(x)`` — the
+    contributing group size). Group keys are already aliased by _prepare_outer."""
     labels = []                     # (value_col, user_alias_or_None, fname, argname)
-    for it in node.get("select_list") or []:
-        if it.get("class") == "COLUMN_REF" and not it.get("alias"):
-            it["alias"] = _colname(it)
     for i, a in enumerate(aggs):
         user_alias = a.get("alias") or None
         a["alias"] = f"__val_{i}"
@@ -230,7 +284,7 @@ def run_sql(code: str, verbs: SafeVerbs, sources: dict) -> Released:
     con = _connect(sources, verbs._policy)
     ast, node = _parse(con, code)
     _walk(ast["statements"])                     # default-deny, whole tree
-    group_cols, aggs = _validate_outer(node)
+    group_cols, aggs = _prepare_outer(node)
     labels = _inject_counts(node, aggs)
     res = con.execute(_deserialize(con, ast)).df()
 
